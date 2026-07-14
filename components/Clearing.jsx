@@ -3,7 +3,7 @@ import { supabase } from "../lib/supabaseClient";
 import { useState, useEffect, useMemo } from "react";
 import {
   Wallet, Landmark, PiggyBank, Users, Plus, Bell, BellRing, Trash2,
-  ArrowRightLeft, X, Zap, ShieldCheck, Heart, Check, Download, Upload
+  ArrowRightLeft, X, Zap, ShieldCheck, Heart, Check, Download, Upload, ArrowDownUp
 } from "lucide-react";
 
 /* Clearing — money in hand, where it goes, what's due next,
@@ -53,6 +53,7 @@ export default function Clearing({ userId }) {
   const [oblig, setOblig] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [payments, setPayments] = useState([]);
+  const [incomes, setIncomes] = useState([]);
   const [celebrate, setCelebrate] = useState(null);
   const [settings, setSettings] = useState({ buffer: 0, budget: 0 });
   const [notif, setNotif] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
@@ -62,17 +63,17 @@ export default function Clearing({ userId }) {
       const { data } = await supabase.from("user_state").select("data").eq("user_id", userId).maybeSingle();
       const d = (data && data.data) || {};
       setAccounts(d.accounts || []); setOblig(d.oblig || []); setExpenses(d.expenses || []);
-      setPayments(d.payments || []); setSettings(d.settings || { buffer: 0, budget: 0 });
+      setPayments(d.payments || []); setIncomes(d.incomes || []); setSettings(d.settings || { buffer: 0, budget: 0 });
     } catch (e) { /* first run: no row yet */ }
     setReady(true);
   })(); }, [userId]);
   useEffect(() => {
     if (!ready) return;
     const t = setTimeout(() => {
-      supabase.from("user_state").upsert({ user_id: userId, data: { accounts, oblig, expenses, payments, settings }, updated_at: new Date().toISOString() }).then(() => {});
+      supabase.from("user_state").upsert({ user_id: userId, data: { accounts, oblig, expenses, payments, incomes, settings }, updated_at: new Date().toISOString() }).then(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [accounts, oblig, expenses, payments, settings, ready, userId]);
+  }, [accounts, oblig, expenses, payments, incomes, settings, ready, userId]);
   useEffect(() => { if (!celebrate) return; const t = setTimeout(() => setCelebrate(null), 4000); return () => clearTimeout(t); }, [celebrate]);
 
   useEffect(() => {
@@ -98,7 +99,7 @@ export default function Clearing({ userId }) {
   async function askNotif() { if (typeof Notification !== "undefined") setNotif(await Notification.requestPermission()); }
 
   function exportData() {
-    const data = { app: "clearing", v: 1, savedAt: new Date().toISOString(), accounts, oblig, expenses, payments, settings };
+    const data = { app: "clearing", v: 1, savedAt: new Date().toISOString(), accounts, oblig, expenses, payments, incomes, settings };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
     const a = document.createElement("a"); a.href = url; a.download = "clearing-backup.json"; a.click(); URL.revokeObjectURL(url);
     setCelebrate("Backup saved. Keep it somewhere safe.");
@@ -113,6 +114,7 @@ export default function Clearing({ userId }) {
         if (d.oblig) setOblig(d.oblig);
         if (d.expenses) setExpenses(d.expenses);
         if (d.payments) setPayments(d.payments);
+        if (d.incomes) setIncomes(d.incomes);
         if (d.settings) setSettings(d.settings);
         setCelebrate("Backup restored. Everything's back.");
       } catch { setCelebrate("Couldn't read that file, sorry."); }
@@ -177,7 +179,8 @@ export default function Clearing({ userId }) {
           </div>
         </div>
       )}
-      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses }} />}
+      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }} />}
+      {tab === "activity" && <Activity {...{ expenses, payments, incomes, oblig, accounts }} />}
       {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate }} />}
 
@@ -186,7 +189,7 @@ export default function Clearing({ userId }) {
       )}
 
       <div className="tabbar">
-        {[["home", "Home", Wallet], ["accounts", "Accounts", Landmark], ["spending", "Spending", PiggyBank], ["clear", "Clear", Users]]
+        {[["home", "Home", Wallet], ["accounts", "Accounts", Landmark], ["activity", "Activity", ArrowDownUp], ["spending", "Spending", PiggyBank], ["clear", "Clear", Users]]
           .map(([id, label, Icon]) => (
             <button key={id} className={tab === id ? "on" : ""} onClick={() => setTab(id)}><Icon size={20} /><span>{label}</span></button>
           ))}
@@ -250,13 +253,17 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
 }
 function Line({ l, v, c }) { return <div className="row" style={{ justifyContent: "space-between" }}><span style={{ color: C.muted }}>{l}</span><span className="num" style={{ color: c }}>{v}</span></div>; }
 
-function Accounts({ accounts, setAccounts, moneyInHand, setExpenses }) {
+function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }) {
   const [adding, setAdding] = useState(false);
   const [moving, setMoving] = useState(false);
   const [income, setIncome] = useState(false);
   const [reconc, setReconc] = useState(null);
   const seed = () => setAccounts(SEED_ACCOUNTS.map(a => ({ ...a, id: crypto.randomUUID(), balance: 0 })));
-  const addIncome = (id, amt) => { setAccounts(x => x.map(a => a.id === id ? { ...a, balance: (+a.balance || 0) + amt } : a)); setIncome(false); };
+  const addIncome = (id, amt) => {
+    setAccounts(x => x.map(a => a.id === id ? { ...a, balance: (+a.balance || 0) + amt } : a));
+    setIncomes(x => [...x, { id: crypto.randomUUID(), accountId: id, amount: amt, date: new Date().toISOString().slice(0, 10) }]);
+    setIncome(false);
+  };
   function reconcile(id, actual) {
     const acc = accounts.find(a => a.id === id); const diff = (+acc.balance || 0) - actual;
     if (diff > 0) setExpenses(x => [...x, { id: crypto.randomUUID(), amount: diff, cat: "Other", date: new Date().toISOString().slice(0, 10), accountId: id, note: "cash correction" }]);
@@ -380,16 +387,18 @@ function MoveForm({ accounts, onMove, onCancel }) {
 }
 
 function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend }) {
-  const [f, setF] = useState({ amount: "", cat: "Food", date: new Date().toISOString().slice(0, 10), accountId: "" });
+  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", date: new Date().toISOString().slice(0, 10), accountId: "" });
   const list = [...monthExp].sort((a, b) => b.date.localeCompare(a.date));
   const over = settings.budget > 0 && monthSpend > settings.budget;
-  const byCat = EXP_CATS.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+  const cats = [...new Set(monthExp.map(e => e.cat).filter(Boolean))];
+  const byCat = cats.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
   const maxCat = byCat[0]?.total || 1;
   function add() {
     if (!f.amount) return;
-    setExpenses(x => [...x, { ...f, amount: +f.amount, id: crypto.randomUUID() }]);
+    const cat = (f.cat === "Other" && f.custom.trim()) ? f.custom.trim() : f.cat;
+    setExpenses(x => [...x, { amount: +f.amount, cat, date: f.date, accountId: f.accountId, id: crypto.randomUUID() }]);
     if (f.accountId) setAccounts(x => x.map(a => a.id === f.accountId ? { ...a, balance: (+a.balance || 0) - +f.amount } : a));
-    setF({ ...f, amount: "" });
+    setF({ ...f, amount: "", custom: "" });
   }
   const rm = (id) => setExpenses(x => x.filter(e => e.id !== id));
   return (
@@ -412,6 +421,9 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
           {EXP_CATS.map(c => (<button key={c} className="btn ghost" onClick={() => setF({ ...f, cat: c })} style={{ padding: "6px 10px", fontSize: 12, borderColor: f.cat === c ? C.teal : C.line, color: f.cat === c ? C.teal : C.muted }}>{c}</button>))}
         </div>
+        {f.cat === "Other" && (
+          <input className="in" placeholder="Name this type (e.g. Gift, Subscription, Childcare)" value={f.custom} onChange={e => setF({ ...f, custom: e.target.value })} />
+        )}
         {accounts.length > 0 && (
           <select className="in" value={f.accountId} onChange={e => setF({ ...f, accountId: e.target.value })}>
             <option value="">Pay from… (optional, updates balance)</option>
@@ -562,7 +574,8 @@ function ObligForm({ onSave, onCancel }) {
   );
 }
 function PayForm({ accounts, onPay, onCancel }) {
-  const [amt, setAmt] = useState(""); const [acc, setAcc] = useState("");
+  const [amt, setAmt] = useState("");
+  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "debt")?.id || accounts[0]?.id || "");
   return (
     <div style={{ marginTop: 10, display: "grid", gap: 8, background: C.surface2, padding: 12, borderRadius: 12 }}>
       <div className="row" style={{ gap: 8 }}>
@@ -571,15 +584,65 @@ function PayForm({ accounts, onPay, onCancel }) {
       </div>
       {accounts.length > 0 && (
         <select className="in" value={acc} onChange={e => setAcc(e.target.value)}>
-          <option value="">From account… (optional)</option>
-          {accounts.map(a => <option key={a.id} value={a.id}>{a.name} — {inr(a.balance)}</option>)}
+          <option value="">Don't deduct from any account</option>
+          {accounts.map(a => <option key={a.id} value={a.id}>Pay from: {a.name} — {inr(a.balance)}</option>)}
         </select>
       )}
+      <div className="foot">Picking an account lowers its balance too. Choose "don't deduct" only if you already paid outside the app.</div>
       <button className="btn" disabled={!amt} onClick={() => onPay(+amt, acc)} style={{ opacity: amt ? 1 : 0.5 }}><Check size={16} /> Record payment</button>
     </div>
   );
 }
 
+function Activity({ expenses, payments, incomes, oblig, accounts }) {
+  const nameOf = (id, list) => (list.find((x) => x.id === id) || {}).name || "";
+  const items = [
+    ...(incomes || []).map((i) => ({ date: i.date, dir: "in", amount: +i.amount || 0, label: "Income" + (nameOf(i.accountId, accounts) ? " → " + nameOf(i.accountId, accounts) : "") })),
+    ...(expenses || []).map((e) => ({ date: e.date, dir: "out", amount: +e.amount || 0, label: e.cat || "Spending" })),
+    ...(payments || []).map((p) => ({ date: p.date, dir: "out", amount: +p.amount || 0, label: "Paid " + (nameOf(p.obligId, oblig) || "a debt") })),
+  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  const monthKey = new Date().toISOString().slice(0, 7);
+  const inM = items.filter((i) => i.dir === "in" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
+  const outM = items.filter((i) => i.dir === "out" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
+
+  // group by date
+  const groups = [];
+  items.forEach((it) => {
+    const g = groups.find((x) => x.date === it.date);
+    if (g) g.rows.push(it); else groups.push({ date: it.date, rows: [it] });
+  });
+  const fmt = (d) => { try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short" }); } catch { return d; } };
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="card" style={{ background: C.surface2 }}>
+        <div className="lbl">This month, in and out</div>
+        <div className="row" style={{ gap: 10, marginTop: 4 }}>
+          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, fontWeight: 700, color: C.teal }}>+ {inr(inM)}</div><div style={{ fontSize: 12, color: C.muted }}>came in</div></div>
+          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, fontWeight: 700, color: C.text }}>− {inr(outM)}</div><div style={{ fontSize: 12, color: C.muted }}>went out</div></div>
+        </div>
+      </div>
+      {groups.length === 0 ? (
+        <div className="card"><Empty>Nothing recorded yet. Add income on Accounts, log spending on Spending, or record a payment on Clear, and it all shows up here.</Empty></div>
+      ) : groups.map((g) => (
+        <div className="card" key={g.date}>
+          <div className="lbl" style={{ marginBottom: 4 }}>{fmt(g.date)}</div>
+          {g.rows.map((r, i) => (
+            <div className="li" key={i}>
+              <div className="row" style={{ gap: 10 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 99, background: r.dir === "in" ? C.teal : C.coral, display: "inline-block" }} />
+                <span style={{ fontSize: 14 }}>{r.label}</span>
+              </div>
+              <span className="num" style={{ fontWeight: 600, color: r.dir === "in" ? C.teal : C.text }}>{r.dir === "in" ? "+ " : "− "}{inr(r.amount)}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="foot">Green is money in, red-dot is money out. Loan and family repayments show here as "Paid …". Transfers between your own accounts aren't shown, since that money hasn't left you.</div>
+    </div>
+  );
+}
 function Stat({ n, l }) {
   return (
     <div style={{ flex: 1, background: "rgba(255,255,255,.6)", borderRadius: 12, padding: "10px 12px" }}>
