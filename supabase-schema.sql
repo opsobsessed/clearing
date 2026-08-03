@@ -12,10 +12,17 @@ create policy "own state - update" on public.user_state for update using (auth.u
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  email text
+  email text,
+  premium_unlocked boolean not null default false,
+  trial_started_at timestamptz
 );
 alter table public.profiles enable row level security;
 create policy "own profile" on public.profiles for select using (auth.uid() = id);
+-- If this project already existed before these columns were added, run these once too:
+-- alter table public.profiles add column if not exists premium_unlocked boolean not null default false;
+-- alter table public.profiles add column if not exists trial_started_at timestamptz;
+-- Both columns are only ever written by the Razorpay verify route using the service_role key
+-- (which bypasses RLS), so there's no insert/update policy for regular users here on purpose.
 
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer as $$
