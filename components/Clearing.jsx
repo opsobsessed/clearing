@@ -252,13 +252,20 @@ function suggestedAPR(o) {
 function buildEvidenceSummary(o, payments) {
   const lines = [];
   lines.push(`${o.name} — ${OTYPE[o.type]?.label || o.type}`);
+  if (o.legalName) lines.push(`Registered/legal name: ${o.legalName}`);
   if (o.lenderContact) lines.push(`Lender contact/reference: ${o.lenderContact}`);
+  if (o.workplaceContact) lines.push(`Workplace contact used by lender: ${o.workplaceContact}`);
   if (o.startDate) lines.push(`Loan started: ${o.startDate}`);
   if (+o.amountTaken > 0) lines.push(`Amount taken (owed): ${inr(o.amountTaken)}`);
   if (+o.amountReceived > 0) lines.push(`Amount received: ${inr(o.amountReceived)}`);
   lines.push(`Outstanding: ${inr(o.outstanding)} · Paid so far: ${inr(o.paid)}`);
   if (o.closedAt) lines.push(`Closed: ${o.closedAt}`);
   lines.push("");
+  if ((o.references || []).length) {
+    lines.push("References given to this lender:");
+    o.references.forEach(r => lines.push(`  ${r.name}${r.relation ? " (" + r.relation + ")" : ""}${r.phone ? " — " + r.phone : ""}`));
+    lines.push("");
+  }
   const hist = (payments || []).filter(p => p.obligId === o.id).sort((a, b) => a.date.localeCompare(b.date));
   if (hist.length) {
     lines.push("Payments:");
@@ -274,7 +281,7 @@ function buildEvidenceSummary(o, payments) {
   if ((o.incidents || []).length) {
     lines.push("Contact / harassment log:");
     [...o.incidents].sort((a, b) => a.date.localeCompare(b.date)).forEach(i =>
-      lines.push(`  ${i.date} — ${i.channel} to ${i.target}${i.notes ? " — " + i.notes : ""}`));
+      lines.push(`  ${i.date} — ${i.channel} to ${i.target}${i.refName ? " (" + i.refName + ")" : ""}${i.agentName ? ", from " + i.agentName : ""}${i.recorded ? " [recorded]" : ""}${i.notes ? " — " + i.notes : ""}`));
     lines.push("");
   }
   if ((o.complaints || []).length) {
@@ -883,7 +890,10 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const targetId = plan.order[0]?.id;
   const add = (o) => { setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
   const upd = (id, p) => setOblig(x => x.map(o => o.id === id ? { ...o, ...p } : o));
-  const rm = (id) => setOblig(x => x.filter(o => o.id !== id));
+  const rm = (id) => {
+    setOblig(x => x.filter(o => o.id !== id));
+    setPayments(x => x.filter(p => p.obligId !== id)); // drop this debt's payment history too, so it can't linger in "cleared" totals
+  };
   function pay(id, amt, accountId, note) {
     const o = oblig.find(x => x.id === id);
     const closes = o && (+o.outstanding || 0) - amt <= 0;
@@ -1104,6 +1114,8 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountReceived || ""} onChange={e => upd(o.id, { amountReceived: +e.target.value })} /></div>
                 </div>
                 <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 8 }} placeholder="Lender contact / account ref (optional)" value={o.lenderContact || ""} onChange={e => upd(o.id, { lenderContact: e.target.value })} />
+                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 6 }} placeholder="Registered / legal name (optional)" value={o.legalName || ""} onChange={e => upd(o.id, { legalName: e.target.value })} />
+                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 6 }} placeholder="Workplace contact (optional)" value={o.workplaceContact || ""} onChange={e => upd(o.id, { workplaceContact: e.target.value })} />
                 <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                   <button className="chip" onClick={() => upd(o.id, { cibilImpact: !o.cibilImpact })} style={{ background: "transparent", border: "1px solid " + (o.cibilImpact ? C.amber : C.line), color: o.cibilImpact ? C.amber : C.muted, cursor: "pointer" }}>CIBIL</button>
                   <button className="chip" onClick={() => upd(o.id, { harassment: !o.harassment })} style={{ background: "transparent", border: "1px solid " + (o.harassment ? C.coral : C.line), color: o.harassment ? C.coral : C.muted, cursor: "pointer" }}>calls</button>
@@ -1140,18 +1152,39 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
 
                     <div>
                       <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>References given to this lender</span>
+                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" ? null : { obligId: o.id, kind: "reference" })}><Plus size={14} /></button>
+                      </div>
+                      {(o.references || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference") && <div className="foot">None logged yet.</div>}
+                      {(o.references || []).map(r => (
+                        <div key={r.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 12, color: C.muted }}>{r.name}{r.relation ? ` (${r.relation})` : ""}{r.phone ? " — " + r.phone : ""}</span>
+                          <button className="ib" onClick={() => removeEvidence(o.id, "references", r.id)}><Trash2 size={12} /></button>
+                        </div>
+                      ))}
+                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" && (
+                        <ReferenceForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "references", entry); setEvidenceForm(null); }} />
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
                         <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Contact / harassment log</span>
                         <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" ? null : { obligId: o.id, kind: "incident" })}><Plus size={14} /></button>
                       </div>
                       {(o.incidents || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident") && <div className="foot">Nothing logged yet.</div>}
                       {[...(o.incidents || [])].sort((a, b) => b.date.localeCompare(a.date)).map(i => (
                         <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 12, color: C.muted }}>{i.date} — {i.channel} to {i.target}{i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}</span>
+                          <span style={{ fontSize: 12, color: C.muted }}>
+                            {i.date} — {i.channel} to {i.target}{i.refName ? ` (${i.refName})` : ""}{i.agentName ? `, from ${i.agentName}` : ""}{i.recorded ? " · recorded" : ""}
+                            {i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}
+                          </span>
                           <button className="ib" onClick={() => removeEvidence(o.id, "incidents", i.id)}><Trash2 size={12} /></button>
                         </div>
                       ))}
                       {evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" && (
-                        <IncidentForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
+                        <IncidentForm references={o.references || []} workplaceContact={o.workplaceContact}
+                          onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
                       )}
                     </div>
 
@@ -1217,6 +1250,7 @@ function ObligForm({ onSave, onCancel }) {
   const [f, setF] = useState({
     name: "", type: "family", outstanding: 0, monthly: 0, dueDay: "", apr: 0, cibilImpact: false, harassment: false,
     paymentType: "installments", isCreditCard: false, startDate: "", amountTaken: 0, amountReceived: 0, lenderContact: "",
+    legalName: "", workplaceContact: "",
   });
   const pickType = (t) => setF(s => ({ ...s, type: t, cibilImpact: t === "regulated", harassment: t === "payday" }));
   return (
@@ -1257,6 +1291,14 @@ function ObligForm({ onSave, onCancel }) {
         <span className="lbl">Lender contact / account ref (optional)</span>
         <input className="in" placeholder="Phone, email, or account number" value={f.lenderContact} onChange={e => setF({ ...f, lenderContact: e.target.value })} />
       </div>
+      <div>
+        <span className="lbl">Registered / legal name (optional)</span>
+        <input className="in" placeholder="Legal or NBFC name, if different from the app name" value={f.legalName} onChange={e => setF({ ...f, legalName: e.target.value })} />
+      </div>
+      <div>
+        <span className="lbl">Workplace contact (optional)</span>
+        <input className="in" placeholder="Name / number they contacted at your workplace" value={f.workplaceContact} onChange={e => setF({ ...f, workplaceContact: e.target.value })} />
+      </div>
       <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
     </div>
   );
@@ -1284,8 +1326,8 @@ function PayForm({ accounts, onPay, onCancel }) {
   );
 }
 
-function IncidentForm({ onSave, onCancel }) {
-  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), channel: "Call", target: "Me", notes: "" });
+function IncidentForm({ onSave, onCancel, references = [], workplaceContact = "" }) {
+  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), channel: "Call", target: "Me", refName: "", agentName: "", recorded: false, notes: "" });
   return (
     <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
       <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} />
@@ -1296,9 +1338,20 @@ function IncidentForm({ onSave, onCancel }) {
       </div>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         {CONTACT_TARGETS.map(t => (
-          <button key={t} className="btn ghost" onClick={() => setF({ ...f, target: t })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.target === t ? C.coral : C.line, color: f.target === t ? C.coral : C.muted }}>{t}</button>
+          <button key={t} className="btn ghost" onClick={() => setF({ ...f, target: t, refName: "" })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.target === t ? C.coral : C.line, color: f.target === t ? C.coral : C.muted }}>{t}</button>
         ))}
       </div>
+      {f.target === "Reference" && references.length > 0 && (
+        <select className="in" value={f.refName} onChange={e => setF({ ...f, refName: e.target.value })}>
+          <option value="">Which reference? (optional)</option>
+          {references.map(r => <option key={r.id} value={r.name}>{r.name}{r.relation ? ` (${r.relation})` : ""}</option>)}
+        </select>
+      )}
+      {f.target === "Workplace" && workplaceContact && (
+        <div className="foot">Workplace contact on file: {workplaceContact}</div>
+      )}
+      <input className="in" placeholder="Caller / agent name (optional)" value={f.agentName} onChange={e => setF({ ...f, agentName: e.target.value })} />
+      <button className="btn ghost" onClick={() => setF({ ...f, recorded: !f.recorded })} style={{ borderColor: f.recorded ? C.teal : C.line, color: f.recorded ? C.teal : C.muted }}>{f.recorded ? "✓ " : ""}Have a recording of this</button>
       <input className="in" placeholder="Notes — what happened, what was said" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
@@ -1342,6 +1395,23 @@ function SettlementForm({ onSave, onCancel }) {
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
         <button className="btn" disabled={!f.offeredAmount} onClick={() => onSave({ ...f, offeredAmount: +f.offeredAmount })} style={{ flex: 1, opacity: f.offeredAmount ? 1 : 0.5 }}>Log it</button>
+      </div>
+    </div>
+  );
+}
+
+function ReferenceForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ name: "", phone: "", relation: "" });
+  return (
+    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+      <input className="in" placeholder="Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
+      <div className="row" style={{ gap: 8 }}>
+        <input className="in" placeholder="Phone number" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} style={{ flex: 1 }} />
+        <input className="in" placeholder="Relation (e.g. sister)" value={f.relation} onChange={e => setF({ ...f, relation: e.target.value })} style={{ flex: 1 }} />
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
+        <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ flex: 1, opacity: f.name ? 1 : 0.5 }}>Add reference</button>
       </div>
     </div>
   );
