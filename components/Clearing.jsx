@@ -863,6 +863,13 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const [expandedId, setExpandedId] = useState(null);
   const [expandedEvidence, setExpandedEvidence] = useState(null);
   const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  function clearAllDebts() {
+    setOblig([]);
+    setPayments([]);
+    setConfirmClearAll(false);
+    onCelebrate("All debts cleared. Add your real numbers whenever you're ready.");
+  }
   function seed() {
     setOblig(SEED_OBLIG.map(o => ({
       id: crypto.randomUUID(), name: o.name, type: o.type, outstanding: o.outstanding || 0, apr: 0, paid: 0, monthly: 0, dueDay: "", status: "open",
@@ -1021,8 +1028,23 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
         </div>
       )}
 
-      <button className="btn ghost" onClick={() => setAdding(true)}><Plus size={16} /> Add something to clear</button>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Add something to clear</button>
+        {oblig.length > 0 && (
+          <button className="btn ghost" onClick={() => setConfirmClearAll(true)} style={{ borderColor: C.coral, color: C.coral }}><Trash2 size={16} /> Clear all</button>
+        )}
+      </div>
       {adding && <ObligForm onSave={add} onCancel={() => setAdding(false)} />}
+      {confirmClearAll && (
+        <div className="card" style={{ border: "1px solid " + C.coral }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, color: C.coral }}>Clear every debt?</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>This removes all {oblig.length} {oblig.length === 1 ? "entry" : "entries"} on this tab — including outstanding amounts, payment history, and any evidence log — so you can re-enter your real numbers from scratch. Your accounts and spending on other tabs aren't touched.</div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost" onClick={() => setConfirmClearAll(false)} style={{ flex: 1 }}>Cancel</button>
+            <button className="btn" onClick={clearAllDebts} style={{ flex: 1, background: C.coral }}>Yes, clear all</button>
+          </div>
+        </div>
+      )}
 
       {groups.map(({ t, items }) => items.length > 0 && (
         <div className="card" key={t}>
