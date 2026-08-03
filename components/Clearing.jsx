@@ -29,6 +29,10 @@ const OTYPE = {
 };
 const EXP_CATS = ["Rent", "Food", "Groceries", "Transport", "Utilities", "Phone", "Medical", "Other"];
 const REMIND_DAYS = 10;
+const CONTACT_CHANNELS = ["Call", "SMS", "WhatsApp", "Email"];
+const CONTACT_TARGETS = ["Me", "Reference", "Workplace", "Family/friend"];
+const COMPLAINT_TARGETS = ["Lender's Grievance Officer", "RBI Ombudsman (cms.rbi.org.in)", "Cybercrime (1930 / cybercrime.gov.in)", "Police", "Other"];
+const COMPLAINT_STATUSES = ["Filed", "Acknowledged", "Resolved", "No response"];
 const ESCALATION_SITUATIONS = [
   {
     key: "legit",
@@ -39,6 +43,10 @@ const ESCALATION_SITUATIONS = [
       "Search that name on the RBI's Digital Lending Apps directory on rbi.org.in to confirm it's tied to a currently active, non-cancelled NBFC or bank licence.",
       "Cross-check the lender on the RBI Sachet portal (sachet.rbi.org.in) — this is specifically where fraud and unauthorised-lending complaints against an entity show up.",
       "No named bank or NBFC, or it's not listed there? You're very likely dealing with an unregistered operator — that changes what's below, including whether it can actually touch your CIBIL and whether police, not the RBI Ombudsman, is the right first stop.",
+    ],
+    links: [
+      { label: "RBI Digital Lending Apps directory", href: "https://www.rbi.org.in/" },
+      { label: "RBI Sachet portal", href: "https://sachet.rbi.org.in/" },
     ],
   },
   {
@@ -62,6 +70,10 @@ const ESCALATION_SITUATIONS = [
       "Report it immediately at cybercrime.gov.in or call 1930 (National Cyber Crime Helpline, 24x7, free).",
       "Also file a complaint at your local police station — many of these operators already have open cases against them, and a formal complaint on record protects you if they ever threaten a false counter-case.",
     ],
+    links: [
+      { label: "cybercrime.gov.in", href: "https://cybercrime.gov.in/" },
+      { label: "Call 1930", href: "tel:1930" },
+    ],
   },
   {
     key: "escalate",
@@ -73,6 +85,7 @@ const ESCALATION_SITUATIONS = [
       "Keep copies of every complaint and response — the Ombudsman process runs on paper trail, and compensation for proven mental agony (up to ₹3 lakh) has been awarded in real cases.",
       "This route is for registered lenders. For unregistered or illegal apps, the police and cybercrime routes above matter more than the Ombudsman, since there's no licence for RBI to act against.",
     ],
+    links: [{ label: "cms.rbi.org.in (RBI Ombudsman)", href: "https://cms.rbi.org.in/" }],
   },
   {
     key: "lawyer",
@@ -83,6 +96,7 @@ const ESCALATION_SITUATIONS = [
       "Get a lawyer if: you've received an actual legal notice or police summons and don't understand it, the amount involved is large enough that a negotiated settlement matters, or you want to pursue the harassment itself as a criminal case rather than just a regulatory complaint.",
       "Before paying anyone privately, check if you qualify for free legal aid through NALSA — eligibility is income-based and varies by state (usually a few lakh a year), but women and a few other categories qualify regardless of income. Apply at nalsa.gov.in or your nearest District Legal Services Authority.",
     ],
+    links: [{ label: "nalsa.gov.in", href: "https://nalsa.gov.in/" }],
   },
 ];
 const inr = (n) => "₹" + new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n || 0));
@@ -123,6 +137,23 @@ function overdueInfo(o, payments) {
   return { overdue: true, daysLate: Math.floor((now - lastDue) / 86400000) };
 }
 const fmtMonthYear = (d) => d ? d.toLocaleDateString("en-IN", { month: "short", year: "numeric" }) : null;
+
+// Shared by the Spending and Activity charts: four selectable windows, each measured
+// from its start up to right now (so "week" is Mon-through-today, not a fixed 7 days).
+const PERIODS = [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"]];
+function periodStart(period) {
+  const now = new Date();
+  if (period === "day") return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (period === "week") {
+    const day = now.getDay();
+    const diff = (day === 0 ? -6 : 1) - day; // back to Monday
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + diff);
+  }
+  if (period === "year") return new Date(now.getFullYear(), 0, 1);
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}
+function inPeriod(dateStr, period) { return new Date(dateStr) >= periodStart(period); }
+const CHART_PALETTE = ["#0052CC", "#00875A", "#E67E22", "#8F4800", "#6554C0", "#DE350B", "#00B8D9", "#5243AA", "#36B37E", "#FF8B00"];
 
 /* Avalanche = highest APR first (least total interest). Snowball = smallest balance first (fastest early wins).
    Extra money each month goes to the top of the order; once a debt clears, its share rolls to the next. */
@@ -187,6 +218,71 @@ function simulateFixedPayoff(balance, aprPct, months) {
   const payment = i === 0 ? balance / months : (balance * i) / (1 - Math.pow(1 + i, -months));
   const totalInterest = Math.max(0, payment * months - balance);
   return { payment: Math.round(payment), totalInterest: Math.round(totalInterest) };
+}
+
+/* Suggests an effective APR from what a lender actually disbursed vs what they say you owe —
+   this is how payday apps hide their real cost: "loan amount ₹50,000" (amountTaken) but only
+   ₹44,000 (amountReceived) ever lands in the account after upfront fees. Always just a suggestion
+   the person can accept or ignore, never forced onto the apr field automatically. */
+function suggestedAPR(o) {
+  const taken = +o.amountTaken || 0, received = +o.amountReceived || 0;
+  if (!(taken > received && received > 0 && o.startDate)) return null;
+  if (o.paymentType === "onetime") {
+    const start = new Date(o.startDate);
+    let due = o.dueDay ? new Date(start.getFullYear(), start.getMonth(), o.dueDay) : null;
+    if (due && due < start) due = new Date(start.getFullYear(), start.getMonth() + 1, o.dueDay);
+    const days = due ? Math.max(1, Math.round((due - start) / 86400000)) : 30; // assume 30d if no due day set
+    return Math.round((((taken / received) - 1) * (365 / days)) * 1000) / 10;
+  }
+  // installments: solve for the monthly rate that makes amountReceived the present value of
+  // the monthly payments over an estimated term (amountTaken / monthly, rounded up).
+  const monthly = +o.monthly || 0;
+  if (!(monthly > 0)) return null;
+  const months = Math.max(1, Math.ceil(taken / monthly));
+  const pv = (i) => i === 0 ? monthly * months : monthly * (1 - Math.pow(1 + i, -months)) / i;
+  if (pv(0) <= received) return 0;
+  let lo = 0, hi = 5;
+  for (let k = 0; k < 60; k++) { const mid = (lo + hi) / 2; if (pv(mid) > received) lo = mid; else hi = mid; }
+  return Math.round(((lo + hi) / 2) * 12 * 1000) / 10;
+}
+
+/* Plain-text report for one loan — everything logged against it, in date order, meant to be
+   pasted into an email/WhatsApp/doc or attached to a formal complaint. Deliberately plain text,
+   not JSON, so it's readable by whoever it's shared with. */
+function buildEvidenceSummary(o, payments) {
+  const lines = [];
+  lines.push(`${o.name} — ${OTYPE[o.type]?.label || o.type}`);
+  if (o.lenderContact) lines.push(`Lender contact/reference: ${o.lenderContact}`);
+  if (o.startDate) lines.push(`Loan started: ${o.startDate}`);
+  if (+o.amountTaken > 0) lines.push(`Amount taken (owed): ${inr(o.amountTaken)}`);
+  if (+o.amountReceived > 0) lines.push(`Amount received: ${inr(o.amountReceived)}`);
+  lines.push(`Outstanding: ${inr(o.outstanding)} · Paid so far: ${inr(o.paid)}`);
+  if (o.closedAt) lines.push(`Closed: ${o.closedAt}`);
+  lines.push("");
+  const hist = (payments || []).filter(p => p.obligId === o.id).sort((a, b) => a.date.localeCompare(b.date));
+  if (hist.length) {
+    lines.push("Payments:");
+    hist.forEach(p => lines.push(`  ${p.date} — ${inr(p.amount)}${p.note ? " (" + p.note + ")" : ""}`));
+    lines.push("");
+  }
+  if ((o.settlements || []).length) {
+    lines.push("Settlement offers:");
+    [...o.settlements].sort((a, b) => a.date.localeCompare(b.date)).forEach(s =>
+      lines.push(`  ${s.date} — offered ${inr(s.offeredAmount)}${s.accepted ? " (accepted)" : ""}${s.notes ? " — " + s.notes : ""}`));
+    lines.push("");
+  }
+  if ((o.incidents || []).length) {
+    lines.push("Contact / harassment log:");
+    [...o.incidents].sort((a, b) => a.date.localeCompare(b.date)).forEach(i =>
+      lines.push(`  ${i.date} — ${i.channel} to ${i.target}${i.notes ? " — " + i.notes : ""}`));
+    lines.push("");
+  }
+  if ((o.complaints || []).length) {
+    lines.push("Complaints filed:");
+    [...o.complaints].sort((a, b) => a.date.localeCompare(b.date)).forEach(c =>
+      lines.push(`  ${c.date} — ${c.filedWith} [${c.status}]${c.refNumber ? " ref: " + c.refNumber : ""}${c.notes ? " — " + c.notes : ""}`));
+  }
+  return lines.join("\n");
 }
 
 export default function Clearing({ userId }) {
@@ -439,6 +535,50 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
 }
 function Line({ l, v, c }) { return <div className="row" style={{ justifyContent: "space-between" }}><span style={{ color: C.muted }}>{l}</span><span className="num" style={{ color: c }}>{v}</span></div>; }
 
+function PeriodToggle({ period, setPeriod }) {
+  return (
+    <div className="row" style={{ gap: 6, marginBottom: 14 }}>
+      {PERIODS.map(([id, label]) => (
+        <button key={id} className="btn ghost" onClick={() => setPeriod(id)}
+          style={{ flex: 1, padding: "6px 4px", fontSize: 12, borderColor: period === id ? C.primary : C.line, color: period === id ? C.primary : C.muted }}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+// CSS conic-gradient donut — no chart library needed. `slices` is [{label, value, color}].
+function PieChart({ slices, size = 120, centerLabel, centerSub }) {
+  const total = slices.reduce((s, x) => s + x.value, 0);
+  let acc = 0;
+  const stops = total > 0
+    ? slices.map(s => { const pct = (s.value / total) * 100, from = acc; acc += pct; return `${s.color} ${from}% ${acc}%`; }).join(", ")
+    : `${C.line} 0% 100%`;
+  return (
+    <div style={{ width: size, height: size, borderRadius: "50%", background: `conic-gradient(${stops})`, position: "relative", flexShrink: 0 }}>
+      <div style={{ position: "absolute", top: "18%", left: "18%", right: "18%", bottom: "18%", borderRadius: "50%", background: C.surface, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        {centerLabel && <div className="num" style={{ fontSize: 15, fontWeight: 700, color: C.text }}>{centerLabel}</div>}
+        {centerSub && <div style={{ fontSize: 10, color: C.faint }}>{centerSub}</div>}
+      </div>
+    </div>
+  );
+}
+function ChartLegend({ items }) {
+  return (
+    <div style={{ flex: 1, display: "grid", gap: 6 }}>
+      {items.map(x => (
+        <div key={x.label} className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span className="row" style={{ gap: 6 }}>
+            <span style={{ width: 9, height: 9, borderRadius: 99, background: x.color, display: "inline-block" }} />
+            {x.label}
+          </span>
+          <span className="num" style={{ color: C.muted }}>{inr(x.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }) {
   const [adding, setAdding] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -577,12 +717,18 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
   const [addingCat, setAddingCat] = useState(false);
   const [newCat, setNewCat] = useState("");
   const [editingCats, setEditingCats] = useState(false);
+  const [chartPeriod, setChartPeriod] = useState("month");
   const list = [...monthExp].sort((a, b) => b.date.localeCompare(a.date));
   const over = settings.budget > 0 && monthSpend > settings.budget;
   const categoryOptions = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
   const cats = [...new Set(monthExp.map(e => e.cat).filter(Boolean))];
   const byCat = cats.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
   const maxCat = byCat[0]?.total || 1;
+  const periodExpenses = expenses.filter(e => inPeriod(e.date, chartPeriod));
+  const periodTotal = periodExpenses.reduce((s, e) => s + (+e.amount || 0), 0);
+  const periodByCat = [...new Set(periodExpenses.map(e => e.cat).filter(Boolean))]
+    .map(c => ({ c, total: periodExpenses.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) }))
+    .filter(x => x.total > 0).sort((a, b) => b.total - a.total);
   const now = new Date();
   const lastMonthKey = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 7);
   const lastMonthSpend = expenses.filter(e => e.date.slice(0, 7) === lastMonthKey).reduce((s, e) => s + (+e.amount || 0), 0);
@@ -662,6 +808,21 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
         <button className="btn" onClick={add} style={{ opacity: f.amount ? 1 : 0.5 }}><Plus size={16} /> Log expense</button>
       </div>
 
+      <div className="card">
+        <div className="lbl" style={{ marginBottom: 4 }}>Category breakdown</div>
+        <PeriodToggle period={chartPeriod} setPeriod={setChartPeriod} />
+        {periodByCat.length === 0 ? <Empty>Nothing logged in this period.</Empty> : (
+          <div className="row" style={{ gap: 16, alignItems: "center" }}>
+            <PieChart
+              centerLabel={inr(periodTotal)}
+              centerSub={PERIODS.find(p => p[0] === chartPeriod)[1]}
+              slices={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: CHART_PALETTE[i % CHART_PALETTE.length] }))}
+            />
+            <ChartLegend items={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: CHART_PALETTE[i % CHART_PALETTE.length] }))} />
+          </div>
+        )}
+      </div>
+
       {byCat.length > 0 && (
         <div className="card">
           <div className="lbl" style={{ marginBottom: 10 }}>Where it went this month</div>
@@ -700,6 +861,8 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const [adding, setAdding] = useState(false);
   const [payFor, setPayFor] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+  const [expandedEvidence, setExpandedEvidence] = useState(null);
+  const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
   function seed() {
     setOblig(SEED_OBLIG.map(o => ({
       id: crypto.randomUUID(), name: o.name, type: o.type, outstanding: o.outstanding || 0, apr: 0, paid: 0, monthly: 0, dueDay: "", status: "open",
@@ -714,18 +877,34 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const add = (o) => { setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
   const upd = (id, p) => setOblig(x => x.map(o => o.id === id ? { ...o, ...p } : o));
   const rm = (id) => setOblig(x => x.filter(o => o.id !== id));
-  function pay(id, amt, accountId) {
+  function pay(id, amt, accountId, note) {
     const o = oblig.find(x => x.id === id);
     const closes = o && (+o.outstanding || 0) - amt <= 0;
+    const today = new Date().toISOString().slice(0, 10);
     setOblig(x => x.map(o => {
       if (o.id !== id) return o;
       const outstanding = Math.max(0, (+o.outstanding || 0) - amt);
-      return { ...o, outstanding, paid: (+o.paid || 0) + amt, status: outstanding === 0 ? "closed" : o.status };
+      return { ...o, outstanding, paid: (+o.paid || 0) + amt, status: outstanding === 0 ? "closed" : o.status, closedAt: outstanding === 0 ? today : o.closedAt };
     }));
-    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: new Date().toISOString().slice(0, 10) }]);
+    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "" }]);
     if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amt } : a));
     onCelebrate(closes ? `Cleared ${o.name} in full. One less to carry.` : `Paid ${inr(amt)} off ${o.name}.`);
     setPayFor(null);
+  }
+  function addEvidence(id, key, entry) {
+    setOblig(x => x.map(o => o.id === id ? { ...o, [key]: [...(o[key] || []), { ...entry, id: crypto.randomUUID() }] } : o));
+  }
+  function removeEvidence(id, key, entryId) {
+    setOblig(x => x.map(o => o.id === id ? { ...o, [key]: (o[key] || []).filter(e => e.id !== entryId) } : o));
+  }
+  function copySummary(o) {
+    const text = buildEvidenceSummary(o, payments);
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(
+        () => onCelebrate("Summary copied — paste it anywhere."),
+        () => onCelebrate("Couldn't copy — your browser blocked it.")
+      );
+    }
   }
   const groups = Object.keys(OTYPE).map(t => ({ t, items: oblig.filter(o => o.type === t) }));
   const owed = t => oblig.filter(o => o.type === t && o.status !== "closed").reduce((s, o) => s + (+o.outstanding || 0), 0);
@@ -736,6 +915,8 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const closedCount = oblig.filter(o => o.status === "closed").length;
   const monthKey = new Date().toISOString().slice(0, 7);
   const clearedThisMonth = (payments || []).filter(p => p.date.slice(0, 7) === monthKey).reduce((s, p) => s + (+p.amount || 0), 0);
+  const feeCostDebts = oblig.filter(o => +o.amountTaken > 0 && +o.amountReceived > 0 && +o.amountTaken > +o.amountReceived);
+  const totalFeeCost = feeCostDebts.reduce((s, o) => s + (+o.amountTaken - +o.amountReceived), 0);
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
@@ -770,6 +951,16 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
           </div>
         </div>
       </div>
+
+      {totalFeeCost > 0 && (
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="lbl" style={{ margin: 0 }}>Fees & interest already baked into what you took</div>
+          </div>
+          <div className="num" style={{ fontSize: 24, fontWeight: 700, marginTop: 4, color: C.coral }}>{inr(totalFeeCost)}</div>
+          <div className="foot" style={{ marginTop: 4 }}>Gap between amount taken and amount received across {feeCostDebts.length} {feeCostDebts.length === 1 ? "loan" : "loans"} — money that never reached you but you're still on the hook for.</div>
+        </div>
+      )}
 
       {oblig.length > 0 && (
         <div className="card">
@@ -844,6 +1035,8 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
             const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" ? 100 : 0);
             const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
             const od = overdueInfo(o, payments);
+            const aprHint = suggestedAPR(o);
+            const evidenceCount = (o.incidents || []).length + (o.complaints || []).length + (o.settlements || []).length;
             const minVsFull = o.isCreditCard && +o.outstanding > 0 ? {
               min: simulateMinPayment(+o.outstanding, +o.apr || 0),
               fixed6: simulateFixedPayoff(+o.outstanding, +o.apr || 0, 6),
@@ -874,6 +1067,21 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                   <input className="in num" style={{ padding: "5px 8px", fontSize: 12, width: 58 }} type="number" min="1" max="31" placeholder="due" value={o.dueDay || ""} onChange={e => upd(o.id, { dueDay: +e.target.value })} />
                   <input className="in num" style={{ padding: "5px 8px", fontSize: 12, width: 64 }} type="number" min="0" step="0.1" placeholder="APR%" value={o.apr || ""} onChange={e => upd(o.id, { apr: +e.target.value })} />
                 </div>
+                {aprHint !== null && (
+                  <div className="row" style={{ justifyContent: "space-between", marginTop: 6, background: C.surface2, borderRadius: 8, padding: "6px 10px" }}>
+                    <span style={{ fontSize: 11.5, color: C.muted }}>Suggested APR from amount taken vs received: <b>{aprHint}%</b></span>
+                    <button className="chip" onClick={() => upd(o.id, { apr: aprHint })} style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>use</button>
+                  </div>
+                )}
+                <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 120px" }}><span className="lbl" style={{ marginBottom: 2 }}>Started</span>
+                    <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} type="date" value={o.startDate || ""} onChange={e => upd(o.id, { startDate: e.target.value })} /></div>
+                  <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Taken</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountTaken || ""} onChange={e => upd(o.id, { amountTaken: +e.target.value })} /></div>
+                  <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Received</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountReceived || ""} onChange={e => upd(o.id, { amountReceived: +e.target.value })} /></div>
+                </div>
+                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 8 }} placeholder="Lender contact / account ref (optional)" value={o.lenderContact || ""} onChange={e => upd(o.id, { lenderContact: e.target.value })} />
                 <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
                   <button className="chip" onClick={() => upd(o.id, { cibilImpact: !o.cibilImpact })} style={{ background: "transparent", border: "1px solid " + (o.cibilImpact ? C.amber : C.line), color: o.cibilImpact ? C.amber : C.muted, cursor: "pointer" }}>CIBIL</button>
                   <button className="chip" onClick={() => upd(o.id, { harassment: !o.harassment })} style={{ background: "transparent", border: "1px solid " + (o.harassment ? C.coral : C.line), color: o.harassment ? C.coral : C.muted, cursor: "pointer" }}>calls</button>
@@ -886,6 +1094,9 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       history ({history.length}){expandedId === o.id ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                     </button>
                   )}
+                  <button className="chip" onClick={() => setExpandedEvidence(expandedEvidence === o.id ? null : o.id)} style={{ background: "transparent", border: "1px solid " + (evidenceCount > 0 ? C.coral : C.line), color: evidenceCount > 0 ? C.coral : C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}>
+                    evidence log ({evidenceCount}){expandedEvidence === o.id ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                  </button>
                 </div>
                 {expandedId === o.id && history.length > 0 && (
                   <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10 }}>
@@ -894,11 +1105,67 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       <span className="num" style={{ fontSize: 12, fontWeight: 700, color: C.teal }}>{inr(o.paid)} of {inr(total)}</span>
                     </div>
                     {history.map(p => (
-                      <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0" }}>
-                        <span style={{ fontSize: 12, color: C.muted }}>{p.date}</span>
+                      <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                        <span style={{ fontSize: 12, color: C.muted }}>{p.date}{p.note ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{p.note}</span> : null}</span>
                         <span className="num" style={{ fontSize: 12 }}>{inr(p.amount)}</span>
                       </div>
                     ))}
+                  </div>
+                )}
+                {expandedEvidence === o.id && (
+                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10, display: "grid", gap: 12 }}>
+                    <button className="btn ghost" onClick={() => copySummary(o)} style={{ fontSize: 12, alignSelf: "flex-start" }}>Copy evidence summary</button>
+
+                    <div>
+                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Contact / harassment log</span>
+                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" ? null : { obligId: o.id, kind: "incident" })}><Plus size={14} /></button>
+                      </div>
+                      {(o.incidents || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident") && <div className="foot">Nothing logged yet.</div>}
+                      {[...(o.incidents || [])].sort((a, b) => b.date.localeCompare(a.date)).map(i => (
+                        <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 12, color: C.muted }}>{i.date} — {i.channel} to {i.target}{i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}</span>
+                          <button className="ib" onClick={() => removeEvidence(o.id, "incidents", i.id)}><Trash2 size={12} /></button>
+                        </div>
+                      ))}
+                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" && (
+                        <IncidentForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Complaints filed</span>
+                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" ? null : { obligId: o.id, kind: "complaint" })}><Plus size={14} /></button>
+                      </div>
+                      {(o.complaints || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint") && <div className="foot">Nothing filed yet.</div>}
+                      {[...(o.complaints || [])].sort((a, b) => b.date.localeCompare(a.date)).map(c => (
+                        <div key={c.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 12, color: C.muted }}>{c.date} — {c.filedWith} [{c.status}]{c.refNumber ? " · ref " + c.refNumber : ""}{c.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{c.notes}</span> : null}</span>
+                          <button className="ib" onClick={() => removeEvidence(o.id, "complaints", c.id)}><Trash2 size={12} /></button>
+                        </div>
+                      ))}
+                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" && (
+                        <ComplaintForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "complaints", entry); setEvidenceForm(null); }} />
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Settlement offers</span>
+                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" ? null : { obligId: o.id, kind: "settlement" })}><Plus size={14} /></button>
+                      </div>
+                      {(o.settlements || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement") && <div className="foot">None logged yet.</div>}
+                      {[...(o.settlements || [])].sort((a, b) => b.date.localeCompare(a.date)).map(s => (
+                        <div key={s.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 12, color: C.muted }}>{s.date} — offered {inr(s.offeredAmount)}{s.accepted ? " (accepted)" : ""}{s.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{s.notes}</span> : null}</span>
+                          <button className="ib" onClick={() => removeEvidence(o.id, "settlements", s.id)}><Trash2 size={12} /></button>
+                        </div>
+                      ))}
+                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" && (
+                        <SettlementForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "settlements", entry); setEvidenceForm(null); }} />
+                      )}
+                    </div>
                   </div>
                 )}
                 {minVsFull && (
@@ -914,7 +1181,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     </div>
                   </div>
                 )}
-                {payFor === o.id && <PayForm accounts={accounts} onPay={(amt, acc) => pay(o.id, amt, acc)} onCancel={() => setPayFor(null)} />}
+                {payFor === o.id && <PayForm accounts={accounts} onPay={(amt, acc, note) => pay(o.id, amt, acc, note)} onCancel={() => setPayFor(null)} />}
               </div>
             );
           })}
@@ -925,7 +1192,10 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   );
 }
 function ObligForm({ onSave, onCancel }) {
-  const [f, setF] = useState({ name: "", type: "family", outstanding: 0, monthly: 0, dueDay: "", apr: 0, cibilImpact: false, harassment: false, paymentType: "installments", isCreditCard: false });
+  const [f, setF] = useState({
+    name: "", type: "family", outstanding: 0, monthly: 0, dueDay: "", apr: 0, cibilImpact: false, harassment: false,
+    paymentType: "installments", isCreditCard: false, startDate: "", amountTaken: 0, amountReceived: 0, lenderContact: "",
+  });
   const pickType = (t) => setF(s => ({ ...s, type: t, cibilImpact: t === "regulated", harassment: t === "payday" }));
   return (
     <div className="card" style={{ display: "grid", gap: 10 }}>
@@ -950,6 +1220,21 @@ function ObligForm({ onSave, onCancel }) {
           <button className="btn ghost" onClick={() => setF(s => ({ ...s, isCreditCard: !s.isCreditCard }))} style={{ padding: "6px 10px", fontSize: 11, borderColor: f.isCreditCard ? C.violet : C.line, color: f.isCreditCard ? C.violet : C.muted }}>{f.isCreditCard ? "✓ " : ""}Credit card</button>
         )}
       </div>
+      <div className="foot" style={{ marginTop: 2 }}>Optional — helps prove what this loan actually cost you, and gives an APR suggestion.</div>
+      <div className="row" style={{ gap: 8 }}>
+        <div style={{ flex: 1 }}><span className="lbl">Loan started</span>
+          <input className="in" type="date" value={f.startDate} onChange={e => setF({ ...f, startDate: e.target.value })} /></div>
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <div style={{ flex: 1 }}><span className="lbl">Amount taken (owed)</span>
+          <input className="in num" type="number" placeholder="0" value={f.amountTaken || ""} onChange={e => setF({ ...f, amountTaken: +e.target.value })} /></div>
+        <div style={{ flex: 1 }}><span className="lbl">Amount received</span>
+          <input className="in num" type="number" placeholder="0" value={f.amountReceived || ""} onChange={e => setF({ ...f, amountReceived: +e.target.value })} /></div>
+      </div>
+      <div>
+        <span className="lbl">Lender contact / account ref (optional)</span>
+        <input className="in" placeholder="Phone, email, or account number" value={f.lenderContact} onChange={e => setF({ ...f, lenderContact: e.target.value })} />
+      </div>
       <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
     </div>
   );
@@ -957,6 +1242,7 @@ function ObligForm({ onSave, onCancel }) {
 function PayForm({ accounts, onPay, onCancel }) {
   const [amt, setAmt] = useState("");
   const [acc, setAcc] = useState(accounts.find(a => a.purpose === "debt")?.id || accounts[0]?.id || "");
+  const [note, setNote] = useState("");
   return (
     <div style={{ marginTop: 10, display: "grid", gap: 8, background: C.surface2, padding: 12, borderRadius: 12 }}>
       <div className="row" style={{ gap: 8 }}>
@@ -969,8 +1255,72 @@ function PayForm({ accounts, onPay, onCancel }) {
           {accounts.map(a => <option key={a.id} value={a.id}>Pay from: {a.name} — {inr(a.balance)}</option>)}
         </select>
       )}
+      <input className="in" placeholder="Reason / note (optional — e.g. Nov EMI, settled early)" value={note} onChange={e => setNote(e.target.value)} />
       <div className="foot">Picking an account lowers its balance too. Choose "don't deduct" only if you already paid outside the app.</div>
-      <button className="btn" disabled={!amt} onClick={() => onPay(+amt, acc)} style={{ opacity: amt ? 1 : 0.5 }}><Check size={16} /> Record payment</button>
+      <button className="btn" disabled={!amt} onClick={() => onPay(+amt, acc, note)} style={{ opacity: amt ? 1 : 0.5 }}><Check size={16} /> Record payment</button>
+    </div>
+  );
+}
+
+function IncidentForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), channel: "Call", target: "Me", notes: "" });
+  return (
+    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+      <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} />
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {CONTACT_CHANNELS.map(c => (
+          <button key={c} className="btn ghost" onClick={() => setF({ ...f, channel: c })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.channel === c ? C.primary : C.line, color: f.channel === c ? C.primary : C.muted }}>{c}</button>
+        ))}
+      </div>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {CONTACT_TARGETS.map(t => (
+          <button key={t} className="btn ghost" onClick={() => setF({ ...f, target: t })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.target === t ? C.coral : C.line, color: f.target === t ? C.coral : C.muted }}>{t}</button>
+        ))}
+      </div>
+      <input className="in" placeholder="Notes — what happened, what was said" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
+        <button className="btn" onClick={() => onSave(f)} style={{ flex: 1 }}>Log it</button>
+      </div>
+    </div>
+  );
+}
+function ComplaintForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), filedWith: COMPLAINT_TARGETS[0], refNumber: "", status: "Filed", notes: "" });
+  return (
+    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+      <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} />
+      <select className="in" value={f.filedWith} onChange={e => setF({ ...f, filedWith: e.target.value })}>
+        {COMPLAINT_TARGETS.map(x => <option key={x} value={x}>{x}</option>)}
+      </select>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {COMPLAINT_STATUSES.map(s => (
+          <button key={s} className="btn ghost" onClick={() => setF({ ...f, status: s })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.status === s ? C.primary : C.line, color: f.status === s ? C.primary : C.muted }}>{s}</button>
+        ))}
+      </div>
+      <input className="in" placeholder="Reference / complaint number (optional)" value={f.refNumber} onChange={e => setF({ ...f, refNumber: e.target.value })} />
+      <input className="in" placeholder="Notes" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
+        <button className="btn" onClick={() => onSave(f)} style={{ flex: 1 }}>Log it</button>
+      </div>
+    </div>
+  );
+}
+function SettlementForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), offeredAmount: "", accepted: false, notes: "" });
+  return (
+    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+      <div className="row" style={{ gap: 8 }}>
+        <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} style={{ flex: 1 }} />
+        <input className="in num" type="number" placeholder="Offered amount" value={f.offeredAmount} onChange={e => setF({ ...f, offeredAmount: e.target.value })} style={{ flex: 1 }} />
+      </div>
+      <button className="btn ghost" onClick={() => setF({ ...f, accepted: !f.accepted })} style={{ borderColor: f.accepted ? C.teal : C.line, color: f.accepted ? C.teal : C.muted }}>{f.accepted ? "✓ " : ""}Accepted</button>
+      <input className="in" placeholder="Notes" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
+        <button className="btn" disabled={!f.offeredAmount} onClick={() => onSave({ ...f, offeredAmount: +f.offeredAmount })} style={{ flex: 1, opacity: f.offeredAmount ? 1 : 0.5 }}>Log it</button>
+      </div>
     </div>
   );
 }
@@ -1000,6 +1350,15 @@ function EscalationHelper() {
               <span style={{ fontSize: 13, lineHeight: 1.5 }}>{step}</span>
             </div>
           ))}
+          {situation.links && situation.links.length > 0 && (
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 2 }}>
+              {situation.links.map(l => (
+                <a key={l.href} href={l.href} target={l.href.startsWith("tel:") ? undefined : "_blank"} rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+                  <span className="chip" style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>{l.label} →</span>
+                </a>
+              ))}
+            </div>
+          )}
         </div>
       )}
       <div className="foot">General guidance, not legal advice — for anything that turns into an actual notice or case, get it checked by someone qualified. NALSA free legal aid is a good first stop before paying anyone.</div>
@@ -1030,10 +1389,26 @@ function Support() {
           <div>• They can't access your contacts, photos, or location without your consent.</div>
           <div>• A woman borrower can only be contacted by a female agent, within set hours.</div>
         </div>
-        <div className="foot" style={{ marginBottom: 10 }}>Getting nowhere with the lender directly? Write to their Grievance / Nodal Officer first (they get 30 days). Still stuck — file a free complaint at <b>cms.rbi.org.in</b> under the RBI Ombudsman Scheme. No lawyer, no fee, and it covers digital lending.</div>
-        <div style={{ fontSize: 13, background: C.surface2, borderRadius: 10, padding: 10 }}>
-          If it crosses into threats, blackmail, or morphed photos — that's a crime, not a lending dispute. Report it at <b>cybercrime.gov.in</b> or call <b>1930</b> (National Cyber Crime Helpline, 24x7).
+        <div className="foot" style={{ marginBottom: 10 }}>
+          Getting nowhere with the lender directly? Write to their Grievance / Nodal Officer first (they get 30 days). Still stuck — file a free complaint at{" "}
+          <a href="https://cms.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>cms.rbi.org.in</a>{" "}
+          under the RBI Ombudsman Scheme. No lawyer, no fee, and it covers digital lending.
         </div>
+        <div style={{ fontSize: 13, background: C.surface2, borderRadius: 10, padding: 10, marginBottom: 10 }}>
+          If it crosses into threats, blackmail, or morphed photos — that's a crime, not a lending dispute, not something to handle alone.
+        </div>
+        <a href="https://cybercrime.gov.in/" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 8, border: "1px solid " + C.line }}>
+            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>National Cyber Crime Reporting Portal</div><div style={{ fontSize: 12, color: C.muted }}>cybercrime.gov.in</div></div>
+            <span className="chip" style={{ background: C.coral, color: "#fff" }}>open</span>
+          </div>
+        </a>
+        <a href="tel:1930" style={{ textDecoration: "none" }}>
+          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", border: "1px solid " + C.line }}>
+            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>National Cyber Crime Helpline</div><div style={{ fontSize: 12, color: C.muted }}>24x7 · toll-free</div></div>
+            <div className="num" style={{ fontWeight: 700, color: C.coral }}>1930</div>
+          </div>
+        </a>
       </div>
 
       <div className="card" style={{ background: C.surface2 }}>
@@ -1076,6 +1451,7 @@ function Support() {
 }
 
 function Activity({ expenses, payments, incomes, oblig, accounts }) {
+  const [payPeriod, setPayPeriod] = useState("month");
   const nameOf = (id, list) => (list.find((x) => x.id === id) || {}).name || "";
   const items = [
     ...(incomes || []).map((i) => ({ date: i.date, dir: "in", amount: +i.amount || 0, label: "Income" + (nameOf(i.accountId, accounts) ? " → " + nameOf(i.accountId, accounts) : "") })),
@@ -1086,6 +1462,12 @@ function Activity({ expenses, payments, incomes, oblig, accounts }) {
   const monthKey = new Date().toISOString().slice(0, 7);
   const inM = items.filter((i) => i.dir === "in" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
   const outM = items.filter((i) => i.dir === "out" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
+
+  const periodPayments = (payments || []).filter(p => inPeriod(p.date, payPeriod));
+  const periodPaid = periodPayments.reduce((s, p) => s + (+p.amount || 0), 0);
+  const paidByType = Object.keys(OTYPE).map(t => ({
+    t, total: periodPayments.filter(p => { const o = oblig.find(x => x.id === p.obligId); return o && o.type === t; }).reduce((s, p) => s + (+p.amount || 0), 0),
+  })).filter(x => x.total > 0);
 
   // group by date
   const groups = [];
@@ -1104,6 +1486,22 @@ function Activity({ expenses, payments, incomes, oblig, accounts }) {
           <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, fontWeight: 700, color: C.text }}>− {inr(outM)}</div><div style={{ fontSize: 12, color: C.muted }}>went out</div></div>
         </div>
       </div>
+
+      <div className="card">
+        <div className="lbl" style={{ marginBottom: 4 }}>Payments breakdown</div>
+        <PeriodToggle period={payPeriod} setPeriod={setPayPeriod} />
+        {paidByType.length === 0 ? <Empty>No payments logged in this period.</Empty> : (
+          <div className="row" style={{ gap: 16, alignItems: "center" }}>
+            <PieChart
+              centerLabel={inr(periodPaid)}
+              centerSub={PERIODS.find(p => p[0] === payPeriod)[1]}
+              slices={paidByType.map(x => ({ label: OTYPE[x.t].short, value: x.total, color: OTYPE[x.t].color }))}
+            />
+            <ChartLegend items={paidByType.map(x => ({ label: OTYPE[x.t].label, value: x.total, color: OTYPE[x.t].color }))} />
+          </div>
+        )}
+      </div>
+
       {groups.length === 0 ? (
         <div className="card"><Empty>Nothing recorded yet. Add income on Accounts, log spending on Spending, or record a payment on Clear, and it all shows up here.</Empty></div>
       ) : groups.map((g) => (
