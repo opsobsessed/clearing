@@ -139,6 +139,9 @@ export default function Page() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
+  const [usePassword, setUsePassword] = useState(false); // password sign-in — only meant for a fixed test account (e.g. for reviewers), everyone else uses the magic link
+  const [password, setPassword] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
   const [profile, setProfile] = useState(undefined); // undefined = loading, null/obj once fetched
 
   useEffect(() => {
@@ -164,6 +167,14 @@ export default function Page() {
     if (error) setErr(error.message); else setSent(true);
   }
 
+  async function signInPassword() {
+    setErr("");
+    setPwBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) setErr(error.message);
+    setPwBusy(false);
+  }
+
   if (session === undefined) return <div style={{ minHeight: "100vh", background: C.bg }} />;
 
   if (!session) {
@@ -171,8 +182,25 @@ export default function Page() {
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter',system-ui,sans-serif", padding: 20, background: C.bg }}>
         <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 26, width: "100%", maxWidth: 380, boxShadow: "0 6px 20px rgba(4,27,60,.06)" }}>
           <div style={{ fontFamily: "'Work Sans',system-ui,sans-serif", fontSize: 24, fontWeight: 700, color: C.text, letterSpacing: "-.02em" }}>Clearing</div>
-          <div style={{ fontSize: 14, color: C.muted, marginTop: 4, marginBottom: 20 }}>Sign in with your email. We send a one-tap link, no password.</div>
-          {sent ? (
+          <div style={{ fontSize: 14, color: C.muted, marginTop: 4, marginBottom: 20 }}>
+            {usePassword ? "Sign in with a test account." : "Sign in with your email. We send a one-tap link, no password."}
+          </div>
+          {usePassword ? (
+            <>
+              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@email.com" type="email"
+                style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1px solid ${C.line}`, fontSize: 15, outline: "none", fontFamily: "inherit", color: C.text }} />
+              <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password"
+                style={{ width: "100%", marginTop: 10, padding: "12px 14px", borderRadius: 8, border: `1px solid ${C.line}`, fontSize: 15, outline: "none", fontFamily: "inherit", color: C.text }} />
+              <button onClick={signInPassword} disabled={!email || !password || pwBusy}
+                style={{ width: "100%", marginTop: 12, padding: "12px", borderRadius: 8, border: "none", background: C.primary, color: "#fff", fontWeight: 600, fontSize: 15, cursor: "pointer", opacity: email && password ? 1 : 0.5, boxShadow: "0 2px 8px rgba(0,82,204,.28)" }}>
+                {pwBusy ? "Signing in…" : "Sign in"}
+              </button>
+              {err && <div style={{ color: C.coral, fontSize: 13, marginTop: 10 }}>{err}</div>}
+              <button onClick={() => { setUsePassword(false); setErr(""); }} style={{ background: "none", border: "none", color: C.faint, fontSize: 12, marginTop: 14, cursor: "pointer", textDecoration: "underline", padding: 0 }}>
+                Use the magic link instead
+              </button>
+            </>
+          ) : sent ? (
             <div style={{ fontSize: 14, color: C.teal, fontWeight: 600 }}>Check your inbox for the sign-in link.</div>
           ) : (
             <>
@@ -183,6 +211,9 @@ export default function Page() {
                 Send me a link
               </button>
               {err && <div style={{ color: C.coral, fontSize: 13, marginTop: 10 }}>{err}</div>}
+              <button onClick={() => { setUsePassword(true); setErr(""); }} style={{ background: "none", border: "none", color: C.faint, fontSize: 12, marginTop: 14, cursor: "pointer", textDecoration: "underline", padding: 0 }}>
+                Have a password instead?
+              </button>
             </>
           )}
         </div>

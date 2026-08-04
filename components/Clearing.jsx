@@ -23,7 +23,7 @@ const PURPOSE = {
   income: { label: "Income", color: C.teal }, living: { label: "Living", color: C.amber }, debt: { label: "Debt", color: C.violet },
 };
 const OTYPE = {
-  regulated: { label: "Regulated loan", short: "Regulated", color: C.primary, icon: ShieldCheck },
+  regulated: { label: "Marked Regulated", short: "Marked Regulated", color: C.primary, icon: ShieldCheck },
   payday: { label: "Payday / app loan", short: "Payday", color: C.coral, icon: Zap },
   family: { label: "Family & friends", short: "Family", color: C.violet, icon: Heart },
 };
@@ -127,7 +127,7 @@ function addMonths(d, n) { const r = new Date(d); r.setMonth(r.getMonth() + n); 
    answer this — once the day passes it just rolls forward to next month, which quietly hides
    a missed payment instead of flagging it. */
 function overdueInfo(o, payments) {
-  if (!o.dueDay || o.status === "closed" || !(+o.monthly > 0)) return { overdue: false };
+  if (!o.dueDay || o.status === "closed" || o.status === "settled" || !(+o.monthly > 0)) return { overdue: false };
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth();
   const thisMonthDue = new Date(y, m, o.dueDay);
@@ -259,7 +259,13 @@ function buildEvidenceSummary(o, payments) {
   if (+o.amountTaken > 0) lines.push(`Amount taken (owed): ${inr(o.amountTaken)}`);
   if (+o.amountReceived > 0) lines.push(`Amount received: ${inr(o.amountReceived)}`);
   lines.push(`Outstanding: ${inr(o.outstanding)} · Paid so far: ${inr(o.paid)}`);
+  if (o.status === "settled") {
+    lines.push(`Status: SETTLED — closed for ${inr(o.settledAmount || o.paid)} instead of the full amount owed${o.settledSavings > 0 ? `, ${inr(o.settledSavings)} waived by the lender` : ""}.`);
+  }
   if (o.closedAt) lines.push(`Closed: ${o.closedAt}`);
+  if (o.status === "closed" || o.status === "settled") {
+    lines.push(o.nocReceived ? `NOC / No Due Certificate: received${o.nocDate ? " on " + o.nocDate : ""}` : `NOC / No Due Certificate: NOT yet received — request this from the lender.`);
+  }
   lines.push("");
   if ((o.references || []).length) {
     lines.push("References given to this lender:");
@@ -295,6 +301,8 @@ function buildEvidenceSummary(o, payments) {
 export default function Clearing({ userId }) {
   const [tab, setTab] = useState("home");
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [accounts, setAccounts] = useState([]);
   const [oblig, setOblig] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -304,15 +312,21 @@ export default function Clearing({ userId }) {
   const [settings, setSettings] = useState({ buffer: 0, budget: 0 });
   const [notif, setNotif] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
 
+  // Loads the saved blob before anything is allowed to render or autosave. This distinguishes a
+  // genuinely new user (no row yet, data === null, error === null) from an actual fetch failure
+  // (network hiccup, RLS issue, etc). Treating both cases the same used to be a real data-loss bug:
+  // any transient error on load would silently reset the UI to empty, and 600ms later the autosave
+  // effect below would write that empty state back over the real saved data, erasing it for good.
+  // Now a genuine error leaves `ready` false — nothing renders, nothing autosaves — until Retry succeeds.
   useEffect(() => { (async () => {
-    try {
-      const { data } = await supabase.from("user_state").select("data").eq("user_id", userId).maybeSingle();
-      const d = (data && data.data) || {};
-      setAccounts(d.accounts || []); setOblig(d.oblig || []); setExpenses(d.expenses || []);
-      setPayments(d.payments || []); setIncomes(d.incomes || []); setSettings(d.settings || { buffer: 0, budget: 0 });
-    } catch (e) { /* first run: no row yet */ }
+    setLoadError(false);
+    const { data, error } = await supabase.from("user_state").select("data").eq("user_id", userId).maybeSingle();
+    if (error) { setLoadError(true); return; }
+    const d = (data && data.data) || {};
+    setAccounts(d.accounts || []); setOblig(d.oblig || []); setExpenses(d.expenses || []);
+    setPayments(d.payments || []); setIncomes(d.incomes || []); setSettings(d.settings || { buffer: 0, budget: 0 });
     setReady(true);
-  })(); }, [userId]);
+  })(); }, [userId, loadAttempt]);
   useEffect(() => {
     if (!ready) return;
     const t = setTimeout(() => {
@@ -327,14 +341,14 @@ export default function Clearing({ userId }) {
     (async () => {
       const today = new Date().toDateString();
       if (localStorage.getItem("clr2:lastNotify") === today) return;
-      const soon = oblig.filter(o => o.status !== "closed" && daysUntil(o.dueDay) !== null && daysUntil(o.dueDay) <= REMIND_DAYS && +o.monthly > 0);
+      const soon = oblig.filter(o => o.status !== "closed" && o.status !== "settled" && daysUntil(o.dueDay) !== null && daysUntil(o.dueDay) <= REMIND_DAYS && +o.monthly > 0);
       soon.forEach(o => { const n = daysUntil(o.dueDay); try { new Notification("Due " + (n === 0 ? "today" : "in " + n + "d") + " · " + o.name, { body: inr(o.monthly) }); } catch {} });
       if (soon.length) localStorage.setItem("clr2:lastNotify", today);
     })();
   }, [ready, notif, oblig]);
 
   const moneyInHand = accounts.reduce((s, a) => s + (+a.balance || 0), 0);
-  const openOblig = oblig.filter(o => o.status !== "closed");
+  const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
   const dueSoon = openOblig
     .map(o => ({ ...o, in: daysUntil(o.dueDay), ...overdueInfo(o, payments) }))
     .filter(o => +o.monthly > 0 && (o.overdue || (o.in !== null && o.in <= REMIND_DAYS)))
@@ -407,6 +421,17 @@ export default function Clearing({ userId }) {
       @keyframes pop{from{transform:translateY(16px) scale(.96);opacity:0}to{transform:none;opacity:1}}
     }
   `;
+  if (loadError) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: C.bg, fontFamily: "'Inter',system-ui,sans-serif" }}>
+        <div style={{ background: C.surface, border: "1px solid " + C.line, borderRadius: 16, padding: 24, maxWidth: 360, textAlign: "center" }}>
+          <div style={{ fontWeight: 700, marginBottom: 6, color: C.text }}>Couldn't load your data</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Nothing has been changed or lost — we just couldn't reach your saved data this time. Check your connection and try again.</div>
+          <button className="btn" onClick={() => setLoadAttempt(n => n + 1)} style={{ background: C.primary, color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}>Retry</button>
+        </div>
+      </div>
+    );
+  }
   if (!ready) return <div style={{ background: C.bg, minHeight: "100vh" }} />;
 
   return (
@@ -474,9 +499,19 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
       )}
       <div className="card" style={{ background: C.surface2 }}>
         <div className="lbl">Safe to spend right now</div>
+        {!settings.seenSafeToSpendIntro && (
+          <div style={{ marginTop: 8, marginBottom: 4, background: C.surface, border: "1px solid " + C.line, borderRadius: 12, padding: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: C.text, marginBottom: 4 }}>What this number means</div>
+            <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
+              This is what's left after everything due in the next {REMIND_DAYS} days — not just your balance. If it's negative, it means your upcoming dues are bigger than what you have right now. That's common when you're juggling multiple loans, and it's exactly why this exists — so you can see it clearly and plan, not be surprised by it.
+            </div>
+            <button className="btn" onClick={() => setSettings(s => ({ ...s, seenSafeToSpendIntro: true }))} style={{ marginTop: 10, padding: "7px 14px", fontSize: 13 }}>Got it</button>
+          </div>
+        )}
         <div className="num" style={{ fontSize: 42, fontWeight: 700, color: safeToSpend >= 0 ? C.teal : C.coral, lineHeight: 1.1 }}>
           {safeToSpend >= 0 ? inr(safeToSpend) : "−" + inr(Math.abs(safeToSpend))}
         </div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>Based on money in hand vs. what's due in the next {REMIND_DAYS} days</div>
         <div style={{ marginTop: 12, display: "grid", gap: 6, fontSize: 13 }}>
           <Line l="Money in hand" v={inr(moneyInHand)} c={C.text} />
           <Line l={"Due within " + REMIND_DAYS + " days"} v={"− " + inr(setAside)} c={C.amber} />
@@ -867,6 +902,7 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
 function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate, settings, setSettings, safeToSpend }) {
   const [adding, setAdding] = useState(false);
   const [payFor, setPayFor] = useState(null);
+  const [settleFor, setSettleFor] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [expandedEvidence, setExpandedEvidence] = useState(null);
   const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
@@ -908,6 +944,22 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     onCelebrate(closes ? `Cleared ${o.name} in full. One less to carry.` : `Paid ${inr(amt)} off ${o.name}.`);
     setPayFor(null);
   }
+  // Closes a debt via a negotiated payoff for less than what's owed — distinct from a normal
+  // full payment. Keeps a record of what was actually paid vs. what was waived, since that's
+  // often useful evidence (and worth celebrating) on its own.
+  function settle(id, amt, accountId, note) {
+    const o = oblig.find(x => x.id === id);
+    if (!o) return;
+    const waived = Math.max(0, (+o.outstanding || 0) - amt);
+    const today = new Date().toISOString().slice(0, 10);
+    setOblig(x => x.map(o => o.id === id
+      ? { ...o, outstanding: 0, paid: (+o.paid || 0) + amt, status: "settled", closedAt: today, settledAmount: amt, settledSavings: waived }
+      : o));
+    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "Settlement — closed for less than owed" }]);
+    if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amt } : a));
+    onCelebrate(waived > 0 ? `Settled ${o.name} for ${inr(amt)} — ${inr(waived)} waived.` : `Settled ${o.name}.`);
+    setSettleFor(null);
+  }
   function addEvidence(id, key, entry) {
     setOblig(x => x.map(o => o.id === id ? { ...o, [key]: [...(o[key] || []), { ...entry, id: crypto.randomUUID() }] } : o));
   }
@@ -929,7 +981,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const clearedAll = (payments || []).reduce((s, p) => s + (+p.amount || 0), 0);
   const grandTotal = totalOwed + clearedAll;
   const pctCleared = grandTotal > 0 ? (clearedAll / grandTotal) * 100 : 0;
-  const closedCount = oblig.filter(o => o.status === "closed").length;
+  const closedCount = oblig.filter(o => o.status === "closed" || o.status === "settled").length;
   const monthKey = new Date().toISOString().slice(0, 7);
   const clearedThisMonth = (payments || []).filter(p => p.date.slice(0, 7) === monthKey).reduce((s, p) => s + (+p.amount || 0), 0);
   const feeCostDebts = oblig.filter(o => +o.amountTaken > 0 && +o.amountReceived > 0 && +o.amountTaken > +o.amountReceived);
@@ -1064,7 +1116,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
           </div>
           {items.map(o => {
             const total = (+o.outstanding || 0) + (+o.paid || 0);
-            const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" ? 100 : 0);
+            const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" || o.status === "settled" ? 100 : 0);
             const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
             const od = overdueInfo(o, payments);
             const aprHint = suggestedAPR(o);
@@ -1074,23 +1126,54 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
               fixed6: simulateFixedPayoff(+o.outstanding, +o.apr || 0, 6),
             } : null;
             return (
-              <div key={o.id} style={{ padding: "11px 0", borderBottom: "1px solid " + C.line, opacity: o.status === "closed" ? 0.6 : 1 }}>
+              <div key={o.id} style={{ padding: "11px 0", borderBottom: "1px solid " + C.line, opacity: (o.status === "closed" || o.status === "settled") ? 0.6 : 1 }}>
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span style={{ fontSize: 14, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    {o.status === "closed" && <Check size={15} color={C.teal} />}{o.name}
+                    {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
                     {od.overdue && <span className="chip" style={{ background: C.coral, color: "#fff" }}>overdue{od.daysLate ? " " + od.daysLate + "d" : ""}</span>}
-                    {o.id === targetId && o.status !== "closed" && <span className="chip" style={{ background: C.primary, color: "#fff" }}>attack first</span>}
+                    {o.id === targetId && o.status !== "closed" && o.status !== "settled" && <span className="chip" style={{ background: C.primary, color: "#fff" }}>attack first</span>}
                     {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
                     {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
                   </span>
                   <div className="row" style={{ gap: 6 }}>
                     {o.status === "closed"
                       ? <span className="chip" style={{ background: C.teal, color: "#fff" }}>cleared</span>
+                      : o.status === "settled"
+                      ? <span className="chip" style={{ background: C.violet, color: "#fff" }}>settled</span>
                       : <span className="num" style={{ fontWeight: 600 }}>{inr(o.outstanding)}</span>}
-                    {o.status !== "closed" && <button className="chip" onClick={() => setPayFor(o.id)} style={{ background: od.overdue ? C.coral : C.primary, color: "#fff", cursor: "pointer" }}>{od.overdue ? "pay now" : "pay"}</button>}
+                    {o.status !== "closed" && o.status !== "settled" && (
+                      <>
+                        <button className="chip" onClick={() => setPayFor(o.id)} style={{ background: od.overdue ? C.coral : C.primary, color: "#fff", cursor: "pointer" }}>{od.overdue ? "pay now" : "pay"}</button>
+                        <button className="chip" onClick={() => setSettleFor(o.id)} style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet, cursor: "pointer" }}>settle</button>
+                      </>
+                    )}
                     <button className="ib" onClick={() => rm(o.id)}><Trash2 size={14} /></button>
                   </div>
                 </div>
+                {o.status === "settled" && (
+                  <div style={{ fontSize: 11.5, color: C.violet, marginTop: 2 }}>
+                    Settled for {inr(o.settledAmount || o.paid)}{o.settledSavings > 0 ? ` — ${inr(o.settledSavings)} waived` : ""}
+                  </div>
+                )}
+                {(o.status === "closed" || o.status === "settled") && (
+                  <div style={{ marginTop: 6, background: C.surface2, borderRadius: 8, padding: 8 }}>
+                    <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11.5, color: C.muted }}>
+                        {o.nocReceived ? <>NOC / No Due Certificate received{o.nocDate ? " on " + o.nocDate : ""}</> : "NOC / No Due Certificate not marked received"}
+                      </span>
+                      <button className="chip" onClick={() => upd(o.id, { nocReceived: !o.nocReceived, nocDate: !o.nocReceived ? new Date().toISOString().slice(0, 10) : o.nocDate })}
+                        style={{ background: o.nocReceived ? C.teal : "transparent", border: "1px solid " + (o.nocReceived ? C.teal : C.coral), color: o.nocReceived ? "#fff" : C.coral, cursor: "pointer", whiteSpace: "nowrap" }}>
+                        {o.nocReceived ? "✓ received" : "mark received"}
+                      </button>
+                    </div>
+                    {!o.nocReceived && (
+                      <div className="foot" style={{ marginTop: 4 }}>
+                        You're entitled to this once a loan is fully closed or settled — it's your proof there's nothing left outstanding.
+                        {o.cibilImpact ? " Especially important here since this one hits CIBIL — without it, your credit report can keep showing the account as unpaid." : ""} Ask the lender for it if they haven't sent one.
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{o.paymentType === "onetime" ? "One-time payoff" : "Paid in installments"}</div>
                 {pct > 0 && <div className="bar" style={{ marginTop: 8 }}><div className="fill" style={{ width: pct + "%", background: OTYPE[t].color }} /></div>}
                 <div className="row" style={{ gap: 8, marginTop: 8 }}>
@@ -1237,6 +1320,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                   </div>
                 )}
                 {payFor === o.id && <PayForm accounts={accounts} onPay={(amt, acc, note) => pay(o.id, amt, acc, note)} onCancel={() => setPayFor(null)} />}
+                {settleFor === o.id && <SettleForm accounts={accounts} outstanding={+o.outstanding || 0} onSettle={(amt, acc, note) => settle(o.id, amt, acc, note)} onCancel={() => setSettleFor(null)} />}
               </div>
             );
           })}
@@ -1260,6 +1344,13 @@ function ObligForm({ onSave, onCancel }) {
       <div className="row" style={{ gap: 6 }}>{Object.keys(OTYPE).map(t => (
         <button key={t} className="btn ghost" onClick={() => pickType(t)} style={{ flex: 1, padding: "8px 6px", fontSize: 12, borderColor: f.type === t ? OTYPE[t].color : C.line, color: f.type === t ? OTYPE[t].color : C.muted }}>{OTYPE[t].short}</button>
       ))}</div>
+      {f.type === "regulated" && (
+        <div className="foot" style={{ marginTop: -4 }}>
+          You're marking this yourself — we don't verify it. Check{" "}
+          <a href="https://www.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>RBI's list of registered lenders</a>{" "}
+          before relying on this. <a href="https://www.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>How to check →</a>
+        </div>
+      )}
       <div className="row" style={{ gap: 8 }}>
         <input className="in num" type="number" placeholder="Outstanding" value={f.outstanding || ""} onChange={e => setF({ ...f, outstanding: +e.target.value })} style={{ flex: 1 }} />
         <input className="in num" type="number" placeholder="Monthly" value={f.monthly || ""} onChange={e => setF({ ...f, monthly: +e.target.value })} style={{ width: 90 }} />
@@ -1322,6 +1413,30 @@ function PayForm({ accounts, onPay, onCancel }) {
       <input className="in" placeholder="Reason / note (optional — e.g. Nov EMI, settled early)" value={note} onChange={e => setNote(e.target.value)} />
       <div className="foot">Picking an account lowers its balance too. Choose "don't deduct" only if you already paid outside the app.</div>
       <button className="btn" disabled={!amt} onClick={() => onPay(+amt, acc, note)} style={{ opacity: amt ? 1 : 0.5 }}><Check size={16} /> Record payment</button>
+    </div>
+  );
+}
+function SettleForm({ accounts, outstanding, onSettle, onCancel }) {
+  const [amt, setAmt] = useState("");
+  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "debt")?.id || accounts[0]?.id || "");
+  const [note, setNote] = useState("");
+  const waived = amt !== "" ? Math.max(0, outstanding - +amt) : 0;
+  return (
+    <div style={{ marginTop: 10, display: "grid", gap: 8, background: C.surface2, padding: 12, borderRadius: 12, border: "1px solid " + C.violet }}>
+      <div style={{ fontSize: 12.5, color: C.muted }}>Use this when the lender agreed to close the account for less than what's owed — this marks it <b>settled</b>, not just paid down, and closes it even if the amount is less than the outstanding balance.</div>
+      <div className="row" style={{ gap: 8 }}>
+        <input className="in num" type="number" placeholder={"Amount actually paid (owed " + inr(outstanding) + ")"} value={amt} onChange={e => setAmt(e.target.value)} style={{ flex: 1 }} autoFocus />
+        <button className="ib" onClick={onCancel}><X size={16} /></button>
+      </div>
+      {waived > 0 && <div className="foot" style={{ color: C.teal }}>{inr(waived)} waived by the lender.</div>}
+      {accounts.length > 0 && (
+        <select className="in" value={acc} onChange={e => setAcc(e.target.value)}>
+          <option value="">Don't deduct from any account</option>
+          {accounts.map(a => <option key={a.id} value={a.id}>Pay from: {a.name} — {inr(a.balance)}</option>)}
+        </select>
+      )}
+      <input className="in" placeholder="Note (optional — e.g. one-time settlement via WhatsApp)" value={note} onChange={e => setNote(e.target.value)} />
+      <button className="btn" disabled={!amt} onClick={() => onSettle(+amt, acc, note)} style={{ opacity: amt ? 1 : 0.5, background: C.violet }}><Check size={16} /> Mark settled & close</button>
     </div>
   );
 }
@@ -1454,6 +1569,7 @@ function EscalationHelper() {
         </div>
       )}
       <div className="foot">General guidance, not legal advice — for anything that turns into an actual notice or case, get it checked by someone qualified. NALSA free legal aid is a good first stop before paying anyone.</div>
+      <div className="foot">"Marked Regulated" tags are set by you, not verified by us. If a lender's status affects what you do next — especially escalation — confirm it directly with RBI's registry first.</div>
     </div>
   );
 }
