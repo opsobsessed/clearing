@@ -8,9 +8,9 @@ const LINKS = {
   // Your Google Calendar appointment-schedule booking page link (Calendar > Create > Appointment schedule > Copy link)
   bookingCalendar: "https://calendar.app.google/dMTvbJ4cjVqh9PtG9",
   // Razorpay Payment Link for the ₹1,000 tier (Dashboard > Payment Links)
-  paymentLink1000: "PASTE_YOUR_1000_RAZORPAY_PAYMENT_LINK_HERE",
+  paymentLink1000: "https://rzp.io/rzp/ZjEHKFi",
   // Razorpay Payment Link for the ₹3,500 tier
-  paymentLink3500: "PASTE_YOUR_3500_RAZORPAY_PAYMENT_LINK_HERE",
+  paymentLink3500: "https://rzp.io/rzp/RYKbGsB",
   // Add one object per live Gumroad product: { name: "Product name", url: "https://..." }
   gumroad: [],
 };
