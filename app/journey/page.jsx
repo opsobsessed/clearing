@@ -13,6 +13,9 @@ const LINKS = {
   paymentLink3500: "https://rzp.io/rzp/RYKbGsB",
   // Add one object per live Gumroad product: { name: "Product name", url: "https://..." }
   gumroad: [],
+  // A Razorpay Payment PAGE (not a Payment Link — Payment Links are fixed-amount only) with a
+  // "Customer Decides Amount" price field. Optional pay-what-you-want support option.
+  supportPage: "PASTE_YOUR_SUPPORT_PAYMENT_PAGE_LINK_HERE",
 };
 
 const C = {
@@ -63,8 +66,35 @@ export default function JourneyPage() {
       <div style={{ maxWidth: 680, margin: "0 auto" }}>
         {/* Hero */}
         <div style={{ fontFamily: "'Work Sans',system-ui,sans-serif", fontSize: 30, fontWeight: 700, letterSpacing: "-.02em" }}>Financially Clueless</div>
-        <div style={{ fontSize: 15, color: C.muted, marginTop: 6, marginBottom: 30, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 15, color: C.muted, marginTop: 6, marginBottom: 18, lineHeight: 1.5 }}>
           7 years, 56 loans, ₹1.2 crore — still working through it. I built Clearing so you don't have to fight this alone.
+        </div>
+
+        {/* Quick links — this is the actual "link tree" part. Someone who already knows what they
+            want (try the app, book a session, browse products) can jump straight there without
+            reading the story first. Put THIS page's link in your bio, not the bare homepage — this
+            is the one place every other link lives. */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 30 }}>
+          <a href="/pricing" style={{ textDecoration: "none" }}>
+            <div style={{ background: C.surface, border: "1px solid " + C.line, borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 600, color: C.text }}>
+              Try the app →
+            </div>
+          </a>
+          <a href="#offers" style={{ textDecoration: "none" }}>
+            <div style={{ background: C.surface, border: "1px solid " + C.line, borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 600, color: C.text }}>
+              Book a 1:1 →
+            </div>
+          </a>
+          <a href="#products" style={{ textDecoration: "none" }}>
+            <div style={{ background: C.surface, border: "1px solid " + C.line, borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 600, color: C.text }}>
+              Digital products →
+            </div>
+          </a>
+          <a href="#support" style={{ textDecoration: "none" }}>
+            <div style={{ background: C.surface, border: "1px solid " + C.line, borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 600, color: C.text }}>
+              Just want to help →
+            </div>
+          </a>
         </div>
 
         {/* Story */}
@@ -76,7 +106,7 @@ export default function JourneyPage() {
         </div>
 
         {/* Offers */}
-        <div style={{ fontSize: 12, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>Work with me</div>
+        <div id="offers" style={{ fontSize: 12, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>Work with me</div>
         <div style={{ display: "grid", gap: 14, marginBottom: 14 }}>
           <OfferCard
             eyebrow="Talk it through"
@@ -106,7 +136,7 @@ export default function JourneyPage() {
         </div>
 
         {/* Gumroad */}
-        <div style={{ fontSize: 12, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>Digital products</div>
+        <div id="products" style={{ fontSize: 12, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>Digital products</div>
         {LINKS.gumroad.length === 0 ? (
           <div style={{ fontSize: 13.5, color: C.faint, marginBottom: 36 }}>More on the way — check back soon.</div>
         ) : (
@@ -121,6 +151,17 @@ export default function JourneyPage() {
             ))}
           </div>
         )}
+
+        {/* Optional pay-what-you-want support option — deliberately understated, sits below the
+            priced offers so it reads as a bonus way to help, not a cheaper alternative to them. */}
+        <div id="support" style={{ border: "1px dashed " + C.line, borderRadius: 12, padding: "14px 16px", marginBottom: 36 }}>
+          <div style={{ fontSize: 13.5, color: C.muted, lineHeight: 1.5, marginBottom: 10 }}>
+            If this helped and you want to support it directly, you can pay whatever feels right — no set price.
+          </div>
+          <a href={LINKS.supportPage} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: C.primary, fontWeight: 600, textDecoration: "none" }}>
+            Support this project →
+          </a>
+        </div>
 
         <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
           Questions about any of this? <a href="mailto:luxefulfilmentco@gmail.com" style={{ color: C.primary, fontWeight: 600 }}>luxefulfilmentco@gmail.com</a>

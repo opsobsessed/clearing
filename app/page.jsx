@@ -250,9 +250,12 @@ export default function Page() {
               </button>
             </>
           )}
-          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}`, display: "grid", gap: 6 }}>
             <a href="/pricing" style={{ fontSize: 12, color: C.primary, fontWeight: 600, textDecoration: "underline" }}>
               See pricing & what's included
+            </a>
+            <a href="/journey" style={{ fontSize: 12, color: C.primary, fontWeight: 600, textDecoration: "underline" }}>
+              Read my story & other ways to work with me
             </a>
           </div>
         </div>

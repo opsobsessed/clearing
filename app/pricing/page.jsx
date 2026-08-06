@@ -183,7 +183,10 @@ export default function PricingPage() {
           For billing questions, refunds, or anything else: <a href="mailto:luxefulfilmentco@gmail.com" style={{ color: C.primary, fontWeight: 600 }}>luxefulfilmentco@gmail.com</a>
         </div>
 
-        <a href="/" style={{ display: "inline-block", marginTop: 20, fontSize: 13, color: C.primary, fontWeight: 600, textDecoration: "none" }}>← Back to sign in</a>
+        <div style={{ display: "flex", gap: 18, marginTop: 20, flexWrap: "wrap" }}>
+          <a href="/" style={{ fontSize: 13, color: C.primary, fontWeight: 600, textDecoration: "none" }}>← Back to sign in</a>
+          <a href="/journey" style={{ fontSize: 13, color: C.primary, fontWeight: 600, textDecoration: "none" }}>My story & 1:1 sessions →</a>
+        </div>
       </div>
     </div>
   );
