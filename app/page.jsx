@@ -106,9 +106,14 @@ function Paywall({ userId, trialExpired, onUnlocked, onTrialStarted, onSignOut }
         <div style={{ fontSize: 12, color: C.faint, marginTop: 16, lineHeight: 1.5 }}>
           One-time payments only, never a subscription. Your data stays saved either way — it just waits for you.
         </div>
-        <button onClick={onSignOut} style={{ background: "none", border: "none", color: C.faint, fontSize: 12, marginTop: 14, cursor: "pointer", textDecoration: "underline", padding: 0 }}>
-          Sign out
-        </button>
+        <div style={{ display: "flex", gap: 14, marginTop: 14 }}>
+          <button onClick={onSignOut} style={{ background: "none", border: "none", color: C.faint, fontSize: 12, cursor: "pointer", textDecoration: "underline", padding: 0 }}>
+            Sign out
+          </button>
+          <a href="/pricing" target="_blank" rel="noopener noreferrer" style={{ color: C.faint, fontSize: 12, textDecoration: "underline" }}>
+            See what's included
+          </a>
+        </div>
       </div>
     </div>
   );
@@ -216,6 +221,11 @@ export default function Page() {
               </button>
             </>
           )}
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+            <a href="/pricing" style={{ fontSize: 12, color: C.primary, fontWeight: 600, textDecoration: "underline" }}>
+              See pricing & what's included
+            </a>
+          </div>
         </div>
       </div>
     );

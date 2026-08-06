@@ -1144,7 +1144,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     {o.status !== "closed" && o.status !== "settled" && (
                       <>
                         <button className="chip" onClick={() => setPayFor(o.id)} style={{ background: od.overdue ? C.coral : C.primary, color: "#fff", cursor: "pointer" }}>{od.overdue ? "pay now" : "pay"}</button>
-                        <button className="chip" onClick={() => setSettleFor(o.id)} style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet, cursor: "pointer" }}>settle</button>
+                        <button className="chip" onClick={() => setSettleFor(o.id)} style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet, cursor: "pointer", whiteSpace: "nowrap" }}>settle for less</button>
                       </>
                     )}
                     <button className="ib" onClick={() => rm(o.id)}><Trash2 size={14} /></button>
@@ -1176,11 +1176,15 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                 )}
                 <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{o.paymentType === "onetime" ? "One-time payoff" : "Paid in installments"}</div>
                 {pct > 0 && <div className="bar" style={{ marginTop: 8 }}><div className="fill" style={{ width: pct + "%", background: OTYPE[t].color }} /></div>}
-                <div className="row" style={{ gap: 8, marginTop: 8 }}>
-                  <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="outstanding" value={o.outstanding || ""} onChange={e => upd(o.id, { outstanding: +e.target.value })} />
-                  <input className="in num" style={{ padding: "5px 8px", fontSize: 12, width: 90 }} type="number" placeholder="monthly" value={o.monthly || ""} onChange={e => upd(o.id, { monthly: +e.target.value })} />
-                  <input className="in num" style={{ padding: "5px 8px", fontSize: 12, width: 58 }} type="number" min="1" max="31" placeholder="due" value={o.dueDay || ""} onChange={e => upd(o.id, { dueDay: +e.target.value })} />
-                  <input className="in num" style={{ padding: "5px 8px", fontSize: 12, width: 64 }} type="number" min="0" step="0.1" placeholder="APR%" value={o.apr || ""} onChange={e => upd(o.id, { apr: +e.target.value })} />
+                <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                  <div style={{ flex: "2 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Outstanding</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.outstanding || ""} onChange={e => upd(o.id, { outstanding: +e.target.value })} /></div>
+                  <div style={{ flex: "1 1 80px" }}><span className="lbl" style={{ marginBottom: 2 }}>Monthly</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.monthly || ""} onChange={e => upd(o.id, { monthly: +e.target.value })} /></div>
+                  <div style={{ flex: "1 1 56px" }}><span className="lbl" style={{ marginBottom: 2 }}>Due day</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="1" max="31" placeholder="—" value={o.dueDay || ""} onChange={e => upd(o.id, { dueDay: +e.target.value })} /></div>
+                  <div style={{ flex: "1 1 62px" }}><span className="lbl" style={{ marginBottom: 2 }}>APR %</span>
+                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="0" step="0.1" placeholder="0" value={o.apr || ""} onChange={e => upd(o.id, { apr: +e.target.value })} /></div>
                 </div>
                 {aprHint !== null && (
                   <div className="row" style={{ justifyContent: "space-between", marginTop: 6, background: C.surface2, borderRadius: 8, padding: "6px 10px" }}>
@@ -1188,7 +1192,8 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     <button className="chip" onClick={() => upd(o.id, { apr: aprHint })} style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>use</button>
                   </div>
                 )}
-                <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".03em", marginTop: 12, marginBottom: 2, borderTop: "1px solid " + C.line, paddingTop: 10 }}>Loan origin (optional)</div>
+                <div className="row" style={{ gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 120px" }}><span className="lbl" style={{ marginBottom: 2 }}>Started</span>
                     <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} type="date" value={o.startDate || ""} onChange={e => upd(o.id, { startDate: e.target.value })} /></div>
                   <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Taken</span>
