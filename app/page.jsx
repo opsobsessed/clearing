@@ -148,6 +148,8 @@ export default function Page() {
   const [password, setPassword] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
   const [profile, setProfile] = useState(undefined); // undefined = loading, null/obj once fetched
+  const [claimChecked, setClaimChecked] = useState(false);
+  const [claimMsg, setClaimMsg] = useState("");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session || null));
@@ -162,6 +164,33 @@ export default function Page() {
       setProfile(data || {});
     })();
   }, [session]);
+
+  // Runs once per sign-in: if this account paid on /pricing before it existed (pay-first flow),
+  // this matches it up by email and grants access automatically — no manual step needed.
+  useEffect(() => {
+    if (!session || profile === undefined || claimChecked) return;
+    setClaimChecked(true);
+    (async () => {
+      try {
+        const res = await fetch("/api/razorpay/claim", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accessToken: session.access_token }),
+        });
+        const result = await res.json();
+        if (res.ok && result.claimed) {
+          setClaimMsg(result.plan === "trial" ? "Payment found — your 7-day trial has started." : "Payment found — you're unlocked forever.");
+          setProfile((p) => ({
+            ...(p || {}),
+            premium_unlocked: result.plan === "trial" ? (p && p.premium_unlocked) : true,
+            trial_started_at: result.plan === "trial" ? new Date().toISOString() : (p && p.trial_started_at),
+          }));
+        }
+      } catch (e) {
+        // Best-effort — claiming silently failing shouldn't block anyone from using the app.
+      }
+    })();
+  }, [session, profile, claimChecked]);
 
   async function signIn() {
     setErr("");
@@ -235,20 +264,31 @@ export default function Page() {
 
   const access = accessFromProfile(session.user.email, profile);
 
+  const claimToast = claimMsg ? (
+    <div style={{ position: "fixed", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 40, background: C.teal, color: "#fff", fontFamily: "'Inter',system-ui,sans-serif", fontSize: 13, fontWeight: 600, padding: "10px 16px", borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,.15)", display: "flex", alignItems: "center", gap: 10 }}>
+      {claimMsg}
+      <button onClick={() => setClaimMsg("")} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0, opacity: 0.85 }}>×</button>
+    </div>
+  ) : null;
+
   if (!access.hasAccess) {
     return (
-      <Paywall
-        userId={session.user.id}
-        trialExpired={access.trialExpired}
-        onUnlocked={() => setProfile((p) => ({ ...p, premium_unlocked: true }))}
-        onTrialStarted={() => setProfile((p) => ({ ...p, trial_started_at: new Date().toISOString() }))}
-        onSignOut={() => supabase.auth.signOut()}
-      />
+      <>
+        {claimToast}
+        <Paywall
+          userId={session.user.id}
+          trialExpired={access.trialExpired}
+          onUnlocked={() => setProfile((p) => ({ ...p, premium_unlocked: true }))}
+          onTrialStarted={() => setProfile((p) => ({ ...p, trial_started_at: new Date().toISOString() }))}
+          onSignOut={() => supabase.auth.signOut()}
+        />
+      </>
     );
   }
 
   return (
     <div>
+      {claimToast}
       {access.trialDaysLeft !== null && (
         <TrialBanner daysLeft={access.trialDaysLeft} userId={session.user.id} onUnlocked={() => setProfile((p) => ({ ...p, premium_unlocked: true }))} />
       )}
