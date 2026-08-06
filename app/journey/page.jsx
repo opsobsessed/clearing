@@ -62,9 +62,9 @@ export default function JourneyPage() {
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Inter',system-ui,sans-serif", color: C.text, padding: "40px 20px" }}>
       <div style={{ maxWidth: 680, margin: "0 auto" }}>
         {/* Hero */}
-        <div style={{ fontFamily: "'Work Sans',system-ui,sans-serif", fontSize: 30, fontWeight: 700, letterSpacing: "-.02em" }}>[Your name]</div>
+        <div style={{ fontFamily: "'Work Sans',system-ui,sans-serif", fontSize: 30, fontWeight: 700, letterSpacing: "-.02em" }}>Financially Clueless</div>
         <div style={{ fontSize: 15, color: C.muted, marginTop: 6, marginBottom: 30, lineHeight: 1.5 }}>
-          [One line on who you are and what you help with — e.g. "I got out of ₹X in payday-loan debt. Now I help people do the same, and built Clearing to make it possible."]
+          7 years, 56 loans, ₹1.2 crore — still working through it. I built Clearing so you don't have to fight this alone.
         </div>
 
         {/* Story */}

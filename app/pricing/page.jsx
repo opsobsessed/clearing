@@ -37,6 +37,11 @@ export default function PricingPage() {
             <div style={{ fontSize: 13.5, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>
               One-time payment. Unlocks every feature in the app, in full, for 7 days — nothing is held back or limited during the trial. Can be started once per account.
             </div>
+            <a href="/" style={{ textDecoration: "none" }}>
+              <div style={{ marginTop: 14, textAlign: "center", background: "#fff", color: C.text, border: "1px solid " + C.line, borderRadius: 8, padding: "11px", fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+                Sign in to start the trial
+              </div>
+            </a>
           </div>
           <div style={{ background: C.surface, border: "1px solid " + C.primary, borderRadius: 16, padding: 20 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -46,7 +51,15 @@ export default function PricingPage() {
             <div style={{ fontSize: 13.5, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>
               One-time payment, permanent access, no subscription and no auto-renewal. Can be bought directly, or any time during/after the trial — if the ₹300 trial was already paid, unlocking forever only costs ₹2,700 more (₹300 + ₹2,700 = ₹3,000 total, never ₹3,300).
             </div>
+            <a href="/" style={{ textDecoration: "none" }}>
+              <div style={{ marginTop: 14, textAlign: "center", background: C.primary, color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+                Sign in to unlock forever
+              </div>
+            </a>
           </div>
+        </div>
+        <div style={{ fontSize: 12, color: C.faint, marginBottom: 36, marginTop: -22 }}>
+          Both buttons take you to sign-in first — payment happens on the next screen, once you're signed in, since it's tied to your account.
         </div>
 
         <div style={{ fontSize: 12, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>What every plan includes</div>
