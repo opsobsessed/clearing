@@ -782,7 +782,13 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
     if (f.accountId) setAccounts(x => x.map(a => a.id === f.accountId ? { ...a, balance: (+a.balance || 0) - +f.amount } : a));
     setF({ ...f, amount: "", custom: "" });
   }
-  const rm = (id) => setExpenses(x => x.filter(e => e.id !== id));
+  // Deletes an expense and, if it had been deducted from an account, adds that amount back —
+  // otherwise money-in-hand would stay permanently understated after removing a mistaken entry.
+  const rm = (id) => {
+    const e = expenses.find(x => x.id === id);
+    setExpenses(x => x.filter(x => x.id !== id));
+    if (e && e.accountId) setAccounts(x => x.map(a => a.id === e.accountId ? { ...a, balance: (+a.balance || 0) + (+e.amount || 0) } : a));
+  };
   function addCategory() {
     const name = newCat.trim();
     if (!name || categoryOptions.includes(name)) { setAddingCat(false); setNewCat(""); return; }
@@ -939,7 +945,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
       const outstanding = Math.max(0, (+o.outstanding || 0) - amt);
       return { ...o, outstanding, paid: (+o.paid || 0) + amt, status: outstanding === 0 ? "closed" : o.status, closedAt: outstanding === 0 ? today : o.closedAt };
     }));
-    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "" }]);
+    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "", accountId: accountId || "" }]);
     if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amt } : a));
     onCelebrate(closes ? `Cleared ${o.name} in full. One less to carry.` : `Paid ${inr(amt)} off ${o.name}.`);
     setPayFor(null);
@@ -955,10 +961,41 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     setOblig(x => x.map(o => o.id === id
       ? { ...o, outstanding: 0, paid: (+o.paid || 0) + amt, status: "settled", closedAt: today, settledAmount: amt, settledSavings: waived }
       : o));
-    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "Settlement — closed for less than owed" }]);
+    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: today, note: note || "Settlement — closed for less than owed", accountId: accountId || "" }]);
     if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amt } : a));
     onCelebrate(waived > 0 ? `Settled ${o.name} for ${inr(amt)} — ${inr(waived)} waived.` : `Settled ${o.name}.`);
     setSettleFor(null);
+  }
+  // Undoes a single logged payment/settlement — for when one was added by mistake (wrong debt,
+  // wrong amount, duplicate entry). Reverses everything it did: gives the amount back to the
+  // debt's outstanding balance, reduces what's recorded as paid, restores the account balance it
+  // was deducted from (if any), and reopens the debt if this payment was the one that closed or
+  // settled it. Older payments made before this field existed won't have accountId set, so their
+  // account balance can't be auto-restored — worth double-checking that account's balance by hand
+  // if you delete one of those.
+  function rmPayment(paymentId) {
+    const p = payments.find(x => x.id === paymentId);
+    if (!p) return;
+    const amt = +p.amount || 0;
+    setPayments(x => x.filter(x => x.id !== paymentId));
+    setOblig(x => x.map(o => {
+      if (o.id !== p.obligId) return o;
+      const wasSettled = o.status === "settled" && o.settledAmount === p.amount;
+      const wasClosedByThis = o.status === "closed" && (+o.outstanding || 0) === 0;
+      if (wasSettled) {
+        // Restore what was owed right before the settlement (settledAmount + what was waived).
+        const restoredOutstanding = (+o.settledAmount || 0) + (+o.settledSavings || 0);
+        const { settledAmount, settledSavings, closedAt, ...rest } = o;
+        return { ...rest, status: "open", outstanding: restoredOutstanding, paid: Math.max(0, (+o.paid || 0) - amt) };
+      }
+      if (wasClosedByThis) {
+        const { closedAt, ...rest } = o;
+        return { ...rest, status: "open", outstanding: amt, paid: Math.max(0, (+o.paid || 0) - amt) };
+      }
+      return { ...o, outstanding: (+o.outstanding || 0) + amt, paid: Math.max(0, (+o.paid || 0) - amt) };
+    }));
+    if (p.accountId) setAccounts(x => x.map(a => a.id === p.accountId ? { ...a, balance: (+a.balance || 0) + amt } : a));
+    onCelebrate("Payment removed — you can log it again if you re-add it correctly.");
   }
   function addEvidence(id, key, entry) {
     setOblig(x => x.map(o => o.id === id ? { ...o, [key]: [...(o[key] || []), { ...entry, id: crypto.randomUUID() }] } : o));
@@ -1227,9 +1264,14 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       <span className="num" style={{ fontSize: 12, fontWeight: 700, color: C.teal }}>{inr(o.paid)} of {inr(total)}</span>
                     </div>
                     {history.map(p => (
-                      <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                      <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start", gap: 8 }}>
                         <span style={{ fontSize: 12, color: C.muted }}>{p.date}{p.note ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{p.note}</span> : null}</span>
-                        <span className="num" style={{ fontSize: 12 }}>{inr(p.amount)}</span>
+                        <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                          <span className="num" style={{ fontSize: 12 }}>{inr(p.amount)}</span>
+                          <button className="ib" title="Remove this payment — logged by mistake?" onClick={() => { if (confirm("Remove this payment of " + inr(p.amount) + "? This puts the amount back on the debt (and back in the account, if one was set) so you can re-add it correctly.")) rmPayment(p.id); }}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
