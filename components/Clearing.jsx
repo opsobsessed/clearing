@@ -102,7 +102,7 @@ const ESCALATION_SITUATIONS = [
 const inr = (n) => "₹" + new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n || 0));
 
 const SEED_ACCOUNTS = [
-  { name: "Kotak 811", purpose: "income" }, { name: "Spending", purpose: "living" }, { name: "Cash", purpose: "living" },
+  { name: "Kotak 811", purpose: "income" }, { name: "Spending", purpose: "living" }, { name: "Cash", purpose: "living", isCash: true },
 ];
 const SEED_OBLIG = [
   ...["HDFC Credit Card", "Axis Finance", "Muthoot Finance"].map(n => ({ name: n, type: "regulated" })),
@@ -303,7 +303,18 @@ export default function Clearing({ userId }) {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [accounts, setAccounts] = useState([]);
+  const [accounts, setAccountsRaw] = useState([]);
+  // Wraps every account update so a physical-cash account (accounts marked isCash) never shows a
+  // negative balance — you can't actually hold less than zero rupees. Bank/digital accounts are
+  // left alone, since going briefly negative there is often legitimate (expense logged before
+  // income lands, overdraft, timing). This floors the *displayed number*, it doesn't explain where
+  // the mismatch came from — that's what "correct to actual" on the Accounts tab is for.
+  const setAccounts = (updater) => {
+    setAccountsRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      return next.map(a => (a.isCash && (+a.balance || 0) < 0) ? { ...a, balance: 0 } : a);
+    });
+  };
   const [oblig, setOblig] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -460,7 +471,7 @@ export default function Clearing({ userId }) {
       )}
       {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }} />}
       {tab === "activity" && <Activity {...{ expenses, payments, incomes, oblig, accounts }} />}
-      {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend }} />}
+      {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
       {tab === "support" && <Support />}
 
@@ -686,6 +697,10 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes 
                 style={{ padding: "8px 10px", fontSize: 12, borderColor: a.purpose === p ? PURPOSE[p].color : C.line, color: a.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
             ))}
           </div>
+          <button className="chip" onClick={() => upd(a.id, { isCash: !a.isCash })} style={{ marginTop: 8, background: "transparent", border: "1px solid " + (a.isCash ? C.teal : C.line), color: a.isCash ? C.teal : C.muted, cursor: "pointer" }}>
+            {a.isCash ? "✓ physical cash" : "mark as physical cash"}
+          </button>
+          {a.isCash && <div className="foot" style={{ marginTop: 4 }}>Never shown below ₹0 — you can't hold negative cash. If it keeps hitting zero, use "correct to actual" below to reset it to what's really in your wallet.</div>}
           {reconc === a.id && <ReconcileForm current={+a.balance || 0} onSave={(actual) => reconcile(a.id, actual)} onCancel={() => setReconc(null)} />}
         </div>
       ))}
@@ -754,8 +769,8 @@ function MoveForm({ accounts, onMove, onCancel }) {
   );
 }
 
-function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend }) {
-  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", date: new Date().toISOString().slice(0, 10), accountId: "" });
+function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }) {
+  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", note: "", date: new Date().toISOString().slice(0, 10), accountId: "" });
   const [addingCat, setAddingCat] = useState(false);
   const [newCat, setNewCat] = useState("");
   const [editingCats, setEditingCats] = useState(false);
@@ -763,14 +778,26 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
   const list = [...monthExp].sort((a, b) => b.date.localeCompare(a.date));
   const over = settings.budget > 0 && monthSpend > settings.budget;
   const categoryOptions = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
+  const monthKey = new Date().toISOString().slice(0, 7);
+  // Loan/debt repayments live in `payments`, not `expenses` — folded in here as one more slice
+  // ("Loan repayments") so the category breakdown gives the full picture of where money went, not
+  // just discretionary spending. The monthly budget total above stays expenses-only on purpose,
+  // since "budget" is about discretionary spending, not debt payoff.
+  const monthPaid = (payments || []).filter(p => p.date.slice(0, 7) === monthKey).reduce((s, p) => s + (+p.amount || 0), 0);
   const cats = [...new Set(monthExp.map(e => e.cat).filter(Boolean))];
-  const byCat = cats.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+  const byCat = [
+    ...cats.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })),
+    ...(monthPaid > 0 ? [{ c: "Loan repayments", total: monthPaid, isLoan: true }] : []),
+  ].filter(x => x.total > 0).sort((a, b) => b.total - a.total);
   const maxCat = byCat[0]?.total || 1;
   const periodExpenses = expenses.filter(e => inPeriod(e.date, chartPeriod));
-  const periodTotal = periodExpenses.reduce((s, e) => s + (+e.amount || 0), 0);
-  const periodByCat = [...new Set(periodExpenses.map(e => e.cat).filter(Boolean))]
-    .map(c => ({ c, total: periodExpenses.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) }))
-    .filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+  const periodPaid = (payments || []).filter(p => inPeriod(p.date, chartPeriod)).reduce((s, p) => s + (+p.amount || 0), 0);
+  const periodTotal = periodExpenses.reduce((s, e) => s + (+e.amount || 0), 0) + periodPaid;
+  const periodByCat = [
+    ...[...new Set(periodExpenses.map(e => e.cat).filter(Boolean))].map(c => ({ c, total: periodExpenses.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })),
+    ...(periodPaid > 0 ? [{ c: "Loan repayments", total: periodPaid, isLoan: true }] : []),
+  ].filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+  const colorFor = (x, i) => x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length];
   const now = new Date();
   const lastMonthKey = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 7);
   const lastMonthSpend = expenses.filter(e => e.date.slice(0, 7) === lastMonthKey).reduce((s, e) => s + (+e.amount || 0), 0);
@@ -778,9 +805,25 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
   function add() {
     if (!f.amount) return;
     const cat = (f.cat === "Other" && f.custom.trim()) ? f.custom.trim() : f.cat;
-    setExpenses(x => [...x, { amount: +f.amount, cat, date: f.date, accountId: f.accountId, id: crypto.randomUUID() }]);
+    setExpenses(x => [...x, { amount: +f.amount, cat, date: f.date, accountId: f.accountId, note: f.note.trim(), id: crypto.randomUUID() }]);
     if (f.accountId) setAccounts(x => x.map(a => a.id === f.accountId ? { ...a, balance: (+a.balance || 0) - +f.amount } : a));
-    setF({ ...f, amount: "", custom: "" });
+    setF({ ...f, amount: "", custom: "", note: "" });
+  }
+  // One CSV per month: every expense plus every loan repayment in monthKey, so the whole month's
+  // outflow can be kept outside the app (backup, tax records, sharing with someone helping you).
+  function downloadMonth() {
+    const rows = [["Date", "Type", "Category / Debt", "Amount", "Note"]];
+    [...monthExp].sort((a, b) => a.date.localeCompare(b.date)).forEach(e => rows.push([e.date, "Expense", e.cat, e.amount, e.note || ""]));
+    (payments || []).filter(p => p.date.slice(0, 7) === monthKey).sort((a, b) => a.date.localeCompare(b.date)).forEach(p => {
+      const debtName = (oblig || []).find(o => o.id === p.obligId)?.name || "Debt";
+      rows.push([p.date, "Loan repayment", debtName, p.amount, p.note || ""]);
+    });
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `clearing-${monthKey}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
   // Deletes an expense and, if it had been deducted from an account, adds that amount back —
   // otherwise money-in-hand would stay permanently understated after removing a mistaken entry.
@@ -847,6 +890,7 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
         {f.cat === "Other" && (
           <input className="in" placeholder="Name this type (e.g. Gift, Subscription, Childcare)" value={f.custom} onChange={e => setF({ ...f, custom: e.target.value })} />
         )}
+        <input className="in" placeholder="What exactly was this? (optional — e.g. Swiggy order, so you remember later)" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
         {accounts.length > 0 && (
           <select className="in" value={f.accountId} onChange={e => setF({ ...f, accountId: e.target.value })}>
             <option value="">Pay from… (optional, updates balance)</option>
@@ -864,30 +908,34 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
             <PieChart
               centerLabel={inr(periodTotal)}
               centerSub={PERIODS.find(p => p[0] === chartPeriod)[1]}
-              slices={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: CHART_PALETTE[i % CHART_PALETTE.length] }))}
+              slices={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: colorFor(x, i) }))}
             />
-            <ChartLegend items={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: CHART_PALETTE[i % CHART_PALETTE.length] }))} />
+            <ChartLegend items={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: colorFor(x, i) }))} />
           </div>
         )}
+        <div className="foot" style={{ marginTop: 8 }}>Includes loan/debt repayments alongside spending categories, so this is the full picture of where money went — not just discretionary spending.</div>
       </div>
 
       {byCat.length > 0 && (
         <div className="card">
-          <div className="lbl" style={{ marginBottom: 10 }}>Where it went this month</div>
-          {byCat.map(({ c, total }) => {
-            const catBudget = (settings.catBudgets || {})[c] || 0;
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+            <div className="lbl" style={{ margin: 0 }}>Where it went this month</div>
+            <button className="btn ghost" onClick={downloadMonth} style={{ padding: "6px 10px", fontSize: 11 }}><Download size={12} /> Download CSV</button>
+          </div>
+          {byCat.map(({ c, total, isLoan }) => {
+            const catBudget = isLoan ? 0 : (settings.catBudgets || {})[c] || 0;
             const catOver = catBudget > 0 && total > catBudget;
             return (
               <div key={c} style={{ marginBottom: 10 }}>
                 <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ fontSize: 13 }}>{c}</span>
+                  <span style={{ fontSize: 13, color: isLoan ? C.violet : C.text, fontWeight: isLoan ? 600 : 400 }}>{c}</span>
                   <div className="row" style={{ gap: 6 }}>
                     <span className="num" style={{ fontSize: 13, color: catOver ? C.coral : C.muted }}>{inr(total)}</span>
-                    <input className="in num" style={{ width: 60, padding: "2px 6px", fontSize: 11 }} type="number" placeholder="budget" value={catBudget || ""}
-                      onChange={e => setSettings(s => ({ ...s, catBudgets: { ...(s.catBudgets || {}), [c]: +e.target.value } }))} />
+                    {!isLoan && <input className="in num" style={{ width: 60, padding: "2px 6px", fontSize: 11 }} type="number" placeholder="budget" value={catBudget || ""}
+                      onChange={e => setSettings(s => ({ ...s, catBudgets: { ...(s.catBudgets || {}), [c]: +e.target.value } }))} />}
                   </div>
                 </div>
-                <div className="bar"><div className="fill" style={{ width: (total / maxCat) * 100 + "%", background: catOver ? C.coral : C.teal }} /></div>
+                <div className="bar"><div className="fill" style={{ width: (total / maxCat) * 100 + "%", background: isLoan ? C.violet : (catOver ? C.coral : C.teal) }} /></div>
               </div>
             );
           })}
@@ -897,7 +945,8 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
       <div className="card">
         {list.length === 0 ? <Empty>No spending logged this month yet.</Empty> :
           list.map(e => (<div key={e.id} className="li">
-            <div><div style={{ fontSize: 14 }}>{e.cat}</div><div style={{ fontSize: 12, color: C.faint }}>{e.date}</div></div>
+            <div><div style={{ fontSize: 14 }}>{e.cat}</div>
+              <div style={{ fontSize: 12, color: C.faint }}>{e.date}{e.note ? " · " + e.note : ""}</div></div>
             <div className="row" style={{ gap: 8 }}><span className="num" style={{ fontWeight: 600 }}>{inr(e.amount)}</span>
               <button className="ib" onClick={() => rm(e.id)}><Trash2 size={15} /></button></div></div>))}
       </div>
@@ -909,10 +958,13 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const [adding, setAdding] = useState(false);
   const [payFor, setPayFor] = useState(null);
   const [settleFor, setSettleFor] = useState(null);
+  // Which single debt currently has its "Edit" panel open — everything past the basics (APR,
+  // monthly/due day, loan origin, contacts, CIBIL/calls/credit-card toggles, payment history, and
+  // the evidence log) lives behind this one toggle so the default list stays scannable.
   const [expandedId, setExpandedId] = useState(null);
-  const [expandedEvidence, setExpandedEvidence] = useState(null);
   const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [search, setSearch] = useState("");
   function clearAllDebts() {
     setOblig([]);
     setPayments([]);
@@ -929,8 +981,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const extra = settings.extraMonthly || 0;
   const suggestedExtra = Math.max(0, Math.round((safeToSpend || 0) - (+settings.buffer || 0)));
   const plan = useMemo(() => buildPayoffPlan(oblig, +extra || 0, strategy), [oblig, extra, strategy]);
-  const targetId = plan.order[0]?.id;
-  const add = (o) => { setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
+  const add = (o) =>{ setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
   const upd = (id, p) => setOblig(x => x.map(o => o.id === id ? { ...o, ...p } : o));
   const rm = (id) => {
     setOblig(x => x.filter(o => o.id !== id));
@@ -1013,6 +1064,11 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     }
   }
   const groups = Object.keys(OTYPE).map(t => ({ t, items: oblig.filter(o => o.type === t) }));
+  const q = search.trim().toLowerCase();
+  const searchedGroups = q
+    ? groups.map(g => ({ ...g, items: g.items.filter(o => (o.name || "").toLowerCase().includes(q) || (o.legalName || "").toLowerCase().includes(q)) }))
+    : groups;
+  const noMatches = q && searchedGroups.every(g => g.items.length === 0);
   const owed = t => oblig.filter(o => o.type === t && o.status !== "closed").reduce((s, o) => s + (+o.outstanding || 0), 0);
   const totalOwed = owed("regulated") + owed("payday") + owed("family");
   const clearedAll = (payments || []).reduce((s, p) => s + (+p.amount || 0), 0);
@@ -1068,6 +1124,267 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
         </div>
       )}
 
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Add something to clear</button>
+        {oblig.length > 0 && (
+          <button className="btn ghost" onClick={() => setConfirmClearAll(true)} style={{ borderColor: C.coral, color: C.coral }}><Trash2 size={16} /> Clear all</button>
+        )}
+      </div>
+      {adding && <ObligForm onSave={add} onCancel={() => setAdding(false)} />}
+      {oblig.length > 3 && (
+        <input className="in" placeholder="Search a loan or person…" value={search} onChange={e => setSearch(e.target.value)} />
+      )}
+      {confirmClearAll && (
+        <div className="card" style={{ border: "1px solid " + C.coral }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, color: C.coral }}>Clear every debt?</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>This removes all {oblig.length} {oblig.length === 1 ? "entry" : "entries"} on this tab — including outstanding amounts, payment history, and any evidence log — so you can re-enter your real numbers from scratch. Your accounts and spending on other tabs aren't touched.</div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost" onClick={() => setConfirmClearAll(false)} style={{ flex: 1 }}>Cancel</button>
+            <button className="btn" onClick={clearAllDebts} style={{ flex: 1, background: C.coral }}>Yes, clear all</button>
+          </div>
+        </div>
+      )}
+
+      {noMatches && <div className="card"><Empty>No loan or person matches "{search}".</Empty></div>}
+      {searchedGroups.map(({ t, items }) => items.length > 0 && (
+        <div className="card" key={t}>
+          <div className="row" style={{ gap: 8, marginBottom: 8 }}>
+            {(() => { const I = OTYPE[t].icon; return <I size={16} color={OTYPE[t].color} />; })()}
+            <span style={{ fontSize: 12, fontWeight: 700, color: OTYPE[t].color, textTransform: "uppercase", letterSpacing: ".03em" }}>{OTYPE[t].label}</span>
+          </div>
+          {items.map(o => {
+            const total = (+o.outstanding || 0) + (+o.paid || 0);
+            const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" || o.status === "settled" ? 100 : 0);
+            const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
+            const od = overdueInfo(o, payments);
+            const aprHint = suggestedAPR(o);
+            const evidenceCount = (o.incidents || []).length + (o.complaints || []).length + (o.settlements || []).length;
+            const minVsFull = o.isCreditCard && +o.outstanding > 0 ? {
+              min: simulateMinPayment(+o.outstanding, +o.apr || 0),
+              fixed6: simulateFixedPayoff(+o.outstanding, +o.apr || 0, 6),
+            } : null;
+            const editing = expandedId === o.id;
+            return (
+              <div key={o.id} style={{ padding: "11px 0", borderBottom: "1px solid " + C.line, opacity: (o.status === "closed" || o.status === "settled") ? 0.6 : 1 }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 14, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
+                    {od.overdue && <span className="chip" style={{ background: C.coral, color: "#fff" }}>overdue{od.daysLate ? " " + od.daysLate + "d" : ""}</span>}
+                    {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
+                    {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
+                  </span>
+                  <div className="row" style={{ gap: 6 }}>
+                    {o.status === "closed"
+                      ? <span className="chip" style={{ background: C.teal, color: "#fff" }}>cleared</span>
+                      : o.status === "settled"
+                      ? <span className="chip" style={{ background: C.violet, color: "#fff" }}>settled</span>
+                      : <span className="num" style={{ fontWeight: 600 }}>{inr(o.outstanding)}</span>}
+                    {o.status !== "closed" && o.status !== "settled" && (
+                      <>
+                        <button className="chip" onClick={() => setPayFor(o.id)} style={{ background: od.overdue ? C.coral : C.primary, color: "#fff", cursor: "pointer" }}>{od.overdue ? "pay now" : "pay"}</button>
+                        <button className="chip" onClick={() => setSettleFor(o.id)} style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet, cursor: "pointer", whiteSpace: "nowrap" }}>settle for less</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {o.status === "settled" && (
+                  <div style={{ fontSize: 11.5, color: C.violet, marginTop: 2 }}>
+                    Settled for {inr(o.settledAmount || o.paid)}{o.settledSavings > 0 ? ` — ${inr(o.settledSavings)} waived` : ""}
+                  </div>
+                )}
+                {(o.status === "closed" || o.status === "settled") && (
+                  <div style={{ marginTop: 6, background: C.surface2, borderRadius: 8, padding: 8 }}>
+                    <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11.5, color: C.muted }}>
+                        {o.nocReceived ? <>NOC / No Due Certificate received{o.nocDate ? " on " + o.nocDate : ""}</> : "NOC / No Due Certificate not marked received"}
+                      </span>
+                      <button className="chip" onClick={() => upd(o.id, { nocReceived: !o.nocReceived, nocDate: !o.nocReceived ? new Date().toISOString().slice(0, 10) : o.nocDate })}
+                        style={{ background: o.nocReceived ? C.teal : "transparent", border: "1px solid " + (o.nocReceived ? C.teal : C.coral), color: o.nocReceived ? "#fff" : C.coral, cursor: "pointer", whiteSpace: "nowrap" }}>
+                        {o.nocReceived ? "✓ received" : "mark received"}
+                      </button>
+                    </div>
+                    {!o.nocReceived && (
+                      <div className="foot" style={{ marginTop: 4 }}>
+                        You're entitled to this once a loan is fully closed or settled — it's your proof there's nothing left outstanding.
+                        {o.cibilImpact ? " Especially important here since this one hits CIBIL — without it, your credit report can keep showing the account as unpaid." : ""} Ask the lender for it if they haven't sent one.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {pct > 0 && <div className="bar" style={{ marginTop: 8 }}><div className="fill" style={{ width: pct + "%", background: OTYPE[t].color }} /></div>}
+                {minVsFull && (
+                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10 }}>
+                    <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}><AlertTriangle size={13} color={C.coral} /> If you only pay the ~5% minimum due</div>
+                    <div className="row" style={{ justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 12 }}>Minimum only</span>
+                      <span className="num" style={{ fontSize: 12, color: C.coral }}>{minVsFull.min.months ? minVsFull.min.months + " mo" : "50+ yrs"} · {inr(minVsFull.min.totalInterest)} interest</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: "space-between", marginTop: 3 }}>
+                      <span style={{ fontSize: 12 }}>Clear it in 6 months instead</span>
+                      <span className="num" style={{ fontSize: 12, color: C.teal }}>{inr(minVsFull.fixed6.payment)}/mo · {inr(minVsFull.fixed6.totalInterest)} interest</span>
+                    </div>
+                  </div>
+                )}
+                {payFor === o.id && <PayForm accounts={accounts} onPay={(amt, acc, note) => pay(o.id, amt, acc, note)} onCancel={() => setPayFor(null)} />}
+                {settleFor === o.id && <SettleForm accounts={accounts} outstanding={+o.outstanding || 0} onSettle={(amt, acc, note) => settle(o.id, amt, acc, note)} onCancel={() => setSettleFor(null)} />}
+
+                <button className="chip" onClick={() => setExpandedId(editing ? null : o.id)} style={{ marginTop: 8, background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}>
+                  {editing ? "close edit" : "edit"} {editing ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                </button>
+
+                {editing && (
+                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10, display: "grid", gap: 12 }}>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ flex: "2 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Outstanding</span>
+                        <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.outstanding || ""} onChange={e => upd(o.id, { outstanding: +e.target.value })} /></div>
+                      <div style={{ flex: "1 1 80px" }}><span className="lbl" style={{ marginBottom: 2 }}>Monthly</span>
+                        <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.monthly || ""} onChange={e => upd(o.id, { monthly: +e.target.value })} /></div>
+                      <div style={{ flex: "1 1 56px" }}><span className="lbl" style={{ marginBottom: 2 }}>Due day</span>
+                        <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="1" max="31" placeholder="—" value={o.dueDay || ""} onChange={e => upd(o.id, { dueDay: +e.target.value })} /></div>
+                      <div style={{ flex: "1 1 62px" }}><span className="lbl" style={{ marginBottom: 2 }}>APR %</span>
+                        <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="0" step="0.1" placeholder="0" value={o.apr || ""} onChange={e => upd(o.id, { apr: +e.target.value })} /></div>
+                    </div>
+                    {aprHint !== null && (
+                      <div className="row" style={{ justifyContent: "space-between", marginTop: -6, background: C.surface, borderRadius: 8, padding: "6px 10px" }}>
+                        <span style={{ fontSize: 11.5, color: C.muted }}>Suggested APR from amount taken vs received: <b>{aprHint}%</b></span>
+                        <button className="chip" onClick={() => upd(o.id, { apr: aprHint })} style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>use</button>
+                      </div>
+                    )}
+                    <div>
+                      <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".03em", marginBottom: 6 }}>Loan origin (optional)</div>
+                      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ flex: "1 1 120px" }}><span className="lbl" style={{ marginBottom: 2 }}>Started</span>
+                          <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} type="date" value={o.startDate || ""} onChange={e => upd(o.id, { startDate: e.target.value })} /></div>
+                        <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Taken</span>
+                          <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountTaken || ""} onChange={e => upd(o.id, { amountTaken: +e.target.value })} /></div>
+                        <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Received</span>
+                          <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountReceived || ""} onChange={e => upd(o.id, { amountReceived: +e.target.value })} /></div>
+                      </div>
+                    </div>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Lender contact / account ref (optional)" value={o.lenderContact || ""} onChange={e => upd(o.id, { lenderContact: e.target.value })} />
+                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Registered / legal name (optional)" value={o.legalName || ""} onChange={e => upd(o.id, { legalName: e.target.value })} />
+                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Workplace contact (optional)" value={o.workplaceContact || ""} onChange={e => upd(o.id, { workplaceContact: e.target.value })} />
+                    </div>
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <button className="chip" onClick={() => upd(o.id, { cibilImpact: !o.cibilImpact })} style={{ background: "transparent", border: "1px solid " + (o.cibilImpact ? C.amber : C.line), color: o.cibilImpact ? C.amber : C.muted, cursor: "pointer" }}>CIBIL</button>
+                      <button className="chip" onClick={() => upd(o.id, { harassment: !o.harassment })} style={{ background: "transparent", border: "1px solid " + (o.harassment ? C.coral : C.line), color: o.harassment ? C.coral : C.muted, cursor: "pointer" }}>calls</button>
+                      <button className="chip" onClick={() => upd(o.id, { paymentType: o.paymentType === "onetime" ? "installments" : "onetime" })} style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer" }}>{o.paymentType === "onetime" ? "one-time" : "installments"}</button>
+                      {t === "regulated" && (
+                        <button className="chip" onClick={() => upd(o.id, { isCreditCard: !o.isCreditCard })} style={{ background: "transparent", border: "1px solid " + (o.isCreditCard ? C.violet : C.line), color: o.isCreditCard ? C.violet : C.muted, cursor: "pointer" }}>{o.isCreditCard ? "✓ credit card" : "mark as credit card"}</button>
+                      )}
+                      <button className="chip" onClick={() => rm(o.id)} style={{ background: "transparent", border: "1px solid " + C.coral, color: C.coral, cursor: "pointer" }}><Trash2 size={11} /> delete debt</button>
+                    </div>
+
+                    {history.length > 0 && (
+                      <div>
+                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Payment history</span>
+                          <span className="num" style={{ fontSize: 12, fontWeight: 700, color: C.teal }}>{inr(o.paid)} of {inr(total)}</span>
+                        </div>
+                        {history.map(p => (
+                          <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start", gap: 8 }}>
+                            <span style={{ fontSize: 12, color: C.muted }}>{p.date}{p.note ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{p.note}</span> : null}</span>
+                            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                              <span className="num" style={{ fontSize: 12 }}>{inr(p.amount)}</span>
+                              <button className="ib" title="Remove this payment — logged by mistake?" onClick={() => { if (confirm("Remove this payment of " + inr(p.amount) + "? This puts the amount back on the debt (and back in the account, if one was set) so you can re-add it correctly.")) rmPayment(p.id); }}>
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: evidenceCount > 0 ? C.coral : C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Evidence log ({evidenceCount})</span>
+                        <button className="btn ghost" onClick={() => copySummary(o)} style={{ fontSize: 11, padding: "4px 8px" }}>Copy summary</button>
+                      </div>
+
+                      <div style={{ marginBottom: 10 }}>
+                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>References given to this lender</span>
+                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" ? null : { obligId: o.id, kind: "reference" })}><Plus size={14} /></button>
+                        </div>
+                        {(o.references || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference") && <div className="foot">None logged yet.</div>}
+                        {(o.references || []).map(r => (
+                          <div key={r.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 12, color: C.muted }}>{r.name}{r.relation ? ` (${r.relation})` : ""}{r.phone ? " — " + r.phone : ""}</span>
+                            <button className="ib" onClick={() => removeEvidence(o.id, "references", r.id)}><Trash2 size={12} /></button>
+                          </div>
+                        ))}
+                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" && (
+                          <ReferenceForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "references", entry); setEvidenceForm(null); }} />
+                        )}
+                      </div>
+
+                      <div style={{ marginBottom: 10 }}>
+                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Contact / harassment log</span>
+                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" ? null : { obligId: o.id, kind: "incident" })}><Plus size={14} /></button>
+                        </div>
+                        {(o.incidents || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident") && <div className="foot">Nothing logged yet.</div>}
+                        {[...(o.incidents || [])].sort((a, b) => b.date.localeCompare(a.date)).map(i => (
+                          <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 12, color: C.muted }}>
+                              {i.date} — {i.channel} to {i.target}{i.refName ? ` (${i.refName})` : ""}{i.agentName ? `, from ${i.agentName}` : ""}{i.recorded ? " · recorded" : ""}
+                              {i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}
+                            </span>
+                            <button className="ib" onClick={() => removeEvidence(o.id, "incidents", i.id)}><Trash2 size={12} /></button>
+                          </div>
+                        ))}
+                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" && (
+                          <IncidentForm references={o.references || []} workplaceContact={o.workplaceContact}
+                            onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
+                        )}
+                      </div>
+
+                      <div style={{ marginBottom: 10 }}>
+                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Complaints filed</span>
+                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" ? null : { obligId: o.id, kind: "complaint" })}><Plus size={14} /></button>
+                        </div>
+                        {(o.complaints || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint") && <div className="foot">Nothing filed yet.</div>}
+                        {[...(o.complaints || [])].sort((a, b) => b.date.localeCompare(a.date)).map(c => (
+                          <div key={c.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 12, color: C.muted }}>{c.date} — {c.filedWith} [{c.status}]{c.refNumber ? " · ref " + c.refNumber : ""}{c.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{c.notes}</span> : null}</span>
+                            <button className="ib" onClick={() => removeEvidence(o.id, "complaints", c.id)}><Trash2 size={12} /></button>
+                          </div>
+                        ))}
+                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" && (
+                          <ComplaintForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "complaints", entry); setEvidenceForm(null); }} />
+                        )}
+                      </div>
+
+                      <div>
+                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Settlement offers</span>
+                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" ? null : { obligId: o.id, kind: "settlement" })}><Plus size={14} /></button>
+                        </div>
+                        {(o.settlements || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement") && <div className="foot">None logged yet.</div>}
+                        {[...(o.settlements || [])].sort((a, b) => b.date.localeCompare(a.date)).map(s => (
+                          <div key={s.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 12, color: C.muted }}>{s.date} — offered {inr(s.offeredAmount)}{s.accepted ? " (accepted)" : ""}{s.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{s.notes}</span> : null}</span>
+                            <button className="ib" onClick={() => removeEvidence(o.id, "settlements", s.id)}><Trash2 size={12} /></button>
+                          </div>
+                        ))}
+                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" && (
+                          <SettlementForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "settlements", entry); setEvidenceForm(null); }} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {/* Payoff plan / attack order — deliberately placed after the debt list, not before it.
+          It's a planning tool you check in on now and then, not something that should push the
+          actual debts you need to act on below the fold every time you open this tab. */}
       {oblig.length > 0 && (
         <div className="card">
           <div className="lbl" style={{ marginBottom: 8 }}>Payoff plan</div>
@@ -1093,7 +1410,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
           </div>
           <div style={{ marginTop: 12 }}>
             {plan.order.length === 0 ? (
-              <div className="foot">Add an APR to each debt below (0 for family & friends) to see a payoff timeline.</div>
+              <div className="foot">Add an APR to each debt above (0 for family & friends — open "Edit" on each one) to see a payoff timeline.</div>
             ) : plan.insufficient ? (
               <div className="foot" style={{ color: C.coral }}>Minimum payments don't cover the interest building up — add some extra above, even a little helps.</div>
             ) : (
@@ -1127,253 +1444,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
         </div>
       )}
 
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Add something to clear</button>
-        {oblig.length > 0 && (
-          <button className="btn ghost" onClick={() => setConfirmClearAll(true)} style={{ borderColor: C.coral, color: C.coral }}><Trash2 size={16} /> Clear all</button>
-        )}
-      </div>
-      {adding && <ObligForm onSave={add} onCancel={() => setAdding(false)} />}
-      {confirmClearAll && (
-        <div className="card" style={{ border: "1px solid " + C.coral }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: C.coral }}>Clear every debt?</div>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>This removes all {oblig.length} {oblig.length === 1 ? "entry" : "entries"} on this tab — including outstanding amounts, payment history, and any evidence log — so you can re-enter your real numbers from scratch. Your accounts and spending on other tabs aren't touched.</div>
-          <div className="row" style={{ gap: 8 }}>
-            <button className="btn ghost" onClick={() => setConfirmClearAll(false)} style={{ flex: 1 }}>Cancel</button>
-            <button className="btn" onClick={clearAllDebts} style={{ flex: 1, background: C.coral }}>Yes, clear all</button>
-          </div>
-        </div>
-      )}
-
-      {groups.map(({ t, items }) => items.length > 0 && (
-        <div className="card" key={t}>
-          <div className="row" style={{ gap: 8, marginBottom: 8 }}>
-            {(() => { const I = OTYPE[t].icon; return <I size={16} color={OTYPE[t].color} />; })()}
-            <span style={{ fontSize: 12, fontWeight: 700, color: OTYPE[t].color, textTransform: "uppercase", letterSpacing: ".03em" }}>{OTYPE[t].label}</span>
-          </div>
-          {items.map(o => {
-            const total = (+o.outstanding || 0) + (+o.paid || 0);
-            const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" || o.status === "settled" ? 100 : 0);
-            const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
-            const od = overdueInfo(o, payments);
-            const aprHint = suggestedAPR(o);
-            const evidenceCount = (o.incidents || []).length + (o.complaints || []).length + (o.settlements || []).length;
-            const minVsFull = o.isCreditCard && +o.outstanding > 0 ? {
-              min: simulateMinPayment(+o.outstanding, +o.apr || 0),
-              fixed6: simulateFixedPayoff(+o.outstanding, +o.apr || 0, 6),
-            } : null;
-            return (
-              <div key={o.id} style={{ padding: "11px 0", borderBottom: "1px solid " + C.line, opacity: (o.status === "closed" || o.status === "settled") ? 0.6 : 1 }}>
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 14, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
-                    {od.overdue && <span className="chip" style={{ background: C.coral, color: "#fff" }}>overdue{od.daysLate ? " " + od.daysLate + "d" : ""}</span>}
-                    {o.id === targetId && o.status !== "closed" && o.status !== "settled" && <span className="chip" style={{ background: C.primary, color: "#fff" }}>attack first</span>}
-                    {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
-                    {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
-                  </span>
-                  <div className="row" style={{ gap: 6 }}>
-                    {o.status === "closed"
-                      ? <span className="chip" style={{ background: C.teal, color: "#fff" }}>cleared</span>
-                      : o.status === "settled"
-                      ? <span className="chip" style={{ background: C.violet, color: "#fff" }}>settled</span>
-                      : <span className="num" style={{ fontWeight: 600 }}>{inr(o.outstanding)}</span>}
-                    {o.status !== "closed" && o.status !== "settled" && (
-                      <>
-                        <button className="chip" onClick={() => setPayFor(o.id)} style={{ background: od.overdue ? C.coral : C.primary, color: "#fff", cursor: "pointer" }}>{od.overdue ? "pay now" : "pay"}</button>
-                        <button className="chip" onClick={() => setSettleFor(o.id)} style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet, cursor: "pointer", whiteSpace: "nowrap" }}>settle for less</button>
-                      </>
-                    )}
-                    <button className="ib" onClick={() => rm(o.id)}><Trash2 size={14} /></button>
-                  </div>
-                </div>
-                {o.status === "settled" && (
-                  <div style={{ fontSize: 11.5, color: C.violet, marginTop: 2 }}>
-                    Settled for {inr(o.settledAmount || o.paid)}{o.settledSavings > 0 ? ` — ${inr(o.settledSavings)} waived` : ""}
-                  </div>
-                )}
-                {(o.status === "closed" || o.status === "settled") && (
-                  <div style={{ marginTop: 6, background: C.surface2, borderRadius: 8, padding: 8 }}>
-                    <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 11.5, color: C.muted }}>
-                        {o.nocReceived ? <>NOC / No Due Certificate received{o.nocDate ? " on " + o.nocDate : ""}</> : "NOC / No Due Certificate not marked received"}
-                      </span>
-                      <button className="chip" onClick={() => upd(o.id, { nocReceived: !o.nocReceived, nocDate: !o.nocReceived ? new Date().toISOString().slice(0, 10) : o.nocDate })}
-                        style={{ background: o.nocReceived ? C.teal : "transparent", border: "1px solid " + (o.nocReceived ? C.teal : C.coral), color: o.nocReceived ? "#fff" : C.coral, cursor: "pointer", whiteSpace: "nowrap" }}>
-                        {o.nocReceived ? "✓ received" : "mark received"}
-                      </button>
-                    </div>
-                    {!o.nocReceived && (
-                      <div className="foot" style={{ marginTop: 4 }}>
-                        You're entitled to this once a loan is fully closed or settled — it's your proof there's nothing left outstanding.
-                        {o.cibilImpact ? " Especially important here since this one hits CIBIL — without it, your credit report can keep showing the account as unpaid." : ""} Ask the lender for it if they haven't sent one.
-                      </div>
-                    )}
-                  </div>
-                )}
-                <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{o.paymentType === "onetime" ? "One-time payoff" : "Paid in installments"}</div>
-                {pct > 0 && <div className="bar" style={{ marginTop: 8 }}><div className="fill" style={{ width: pct + "%", background: OTYPE[t].color }} /></div>}
-                <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                  <div style={{ flex: "2 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Outstanding</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.outstanding || ""} onChange={e => upd(o.id, { outstanding: +e.target.value })} /></div>
-                  <div style={{ flex: "1 1 80px" }}><span className="lbl" style={{ marginBottom: 2 }}>Monthly</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.monthly || ""} onChange={e => upd(o.id, { monthly: +e.target.value })} /></div>
-                  <div style={{ flex: "1 1 56px" }}><span className="lbl" style={{ marginBottom: 2 }}>Due day</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="1" max="31" placeholder="—" value={o.dueDay || ""} onChange={e => upd(o.id, { dueDay: +e.target.value })} /></div>
-                  <div style={{ flex: "1 1 62px" }}><span className="lbl" style={{ marginBottom: 2 }}>APR %</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" min="0" step="0.1" placeholder="0" value={o.apr || ""} onChange={e => upd(o.id, { apr: +e.target.value })} /></div>
-                </div>
-                {aprHint !== null && (
-                  <div className="row" style={{ justifyContent: "space-between", marginTop: 6, background: C.surface2, borderRadius: 8, padding: "6px 10px" }}>
-                    <span style={{ fontSize: 11.5, color: C.muted }}>Suggested APR from amount taken vs received: <b>{aprHint}%</b></span>
-                    <button className="chip" onClick={() => upd(o.id, { apr: aprHint })} style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>use</button>
-                  </div>
-                )}
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: ".03em", marginTop: 12, marginBottom: 2, borderTop: "1px solid " + C.line, paddingTop: 10 }}>Loan origin (optional)</div>
-                <div className="row" style={{ gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-                  <div style={{ flex: "1 1 120px" }}><span className="lbl" style={{ marginBottom: 2 }}>Started</span>
-                    <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} type="date" value={o.startDate || ""} onChange={e => upd(o.id, { startDate: e.target.value })} /></div>
-                  <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Taken</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountTaken || ""} onChange={e => upd(o.id, { amountTaken: +e.target.value })} /></div>
-                  <div style={{ flex: "1 1 100px" }}><span className="lbl" style={{ marginBottom: 2 }}>Received</span>
-                    <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountReceived || ""} onChange={e => upd(o.id, { amountReceived: +e.target.value })} /></div>
-                </div>
-                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 8 }} placeholder="Lender contact / account ref (optional)" value={o.lenderContact || ""} onChange={e => upd(o.id, { lenderContact: e.target.value })} />
-                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 6 }} placeholder="Registered / legal name (optional)" value={o.legalName || ""} onChange={e => upd(o.id, { legalName: e.target.value })} />
-                <input className="in" style={{ padding: "5px 8px", fontSize: 12, marginTop: 6 }} placeholder="Workplace contact (optional)" value={o.workplaceContact || ""} onChange={e => upd(o.id, { workplaceContact: e.target.value })} />
-                <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                  <button className="chip" onClick={() => upd(o.id, { cibilImpact: !o.cibilImpact })} style={{ background: "transparent", border: "1px solid " + (o.cibilImpact ? C.amber : C.line), color: o.cibilImpact ? C.amber : C.muted, cursor: "pointer" }}>CIBIL</button>
-                  <button className="chip" onClick={() => upd(o.id, { harassment: !o.harassment })} style={{ background: "transparent", border: "1px solid " + (o.harassment ? C.coral : C.line), color: o.harassment ? C.coral : C.muted, cursor: "pointer" }}>calls</button>
-                  <button className="chip" onClick={() => upd(o.id, { paymentType: o.paymentType === "onetime" ? "installments" : "onetime" })} style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer" }}>{o.paymentType === "onetime" ? "one-time" : "installments"}</button>
-                  {t === "regulated" && (
-                    <button className="chip" onClick={() => upd(o.id, { isCreditCard: !o.isCreditCard })} style={{ background: "transparent", border: "1px solid " + (o.isCreditCard ? C.violet : C.line), color: o.isCreditCard ? C.violet : C.muted, cursor: "pointer" }}>{o.isCreditCard ? "✓ credit card" : "mark as credit card"}</button>
-                  )}
-                  {history.length > 0 && (
-                    <button className="chip" onClick={() => setExpandedId(expandedId === o.id ? null : o.id)} style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}>
-                      history ({history.length}){expandedId === o.id ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-                    </button>
-                  )}
-                  <button className="chip" onClick={() => setExpandedEvidence(expandedEvidence === o.id ? null : o.id)} style={{ background: "transparent", border: "1px solid " + (evidenceCount > 0 ? C.coral : C.line), color: evidenceCount > 0 ? C.coral : C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 3 }}>
-                    evidence log ({evidenceCount}){expandedEvidence === o.id ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-                  </button>
-                </div>
-                {expandedId === o.id && history.length > 0 && (
-                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10 }}>
-                    <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                      <span style={{ fontSize: 11.5, color: C.muted }}>Paid so far</span>
-                      <span className="num" style={{ fontSize: 12, fontWeight: 700, color: C.teal }}>{inr(o.paid)} of {inr(total)}</span>
-                    </div>
-                    {history.map(p => (
-                      <div key={p.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start", gap: 8 }}>
-                        <span style={{ fontSize: 12, color: C.muted }}>{p.date}{p.note ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{p.note}</span> : null}</span>
-                        <div className="row" style={{ gap: 6, alignItems: "center" }}>
-                          <span className="num" style={{ fontSize: 12 }}>{inr(p.amount)}</span>
-                          <button className="ib" title="Remove this payment — logged by mistake?" onClick={() => { if (confirm("Remove this payment of " + inr(p.amount) + "? This puts the amount back on the debt (and back in the account, if one was set) so you can re-add it correctly.")) rmPayment(p.id); }}>
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {expandedEvidence === o.id && (
-                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10, display: "grid", gap: 12 }}>
-                    <button className="btn ghost" onClick={() => copySummary(o)} style={{ fontSize: 12, alignSelf: "flex-start" }}>Copy evidence summary</button>
-
-                    <div>
-                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>References given to this lender</span>
-                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" ? null : { obligId: o.id, kind: "reference" })}><Plus size={14} /></button>
-                      </div>
-                      {(o.references || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference") && <div className="foot">None logged yet.</div>}
-                      {(o.references || []).map(r => (
-                        <div key={r.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 12, color: C.muted }}>{r.name}{r.relation ? ` (${r.relation})` : ""}{r.phone ? " — " + r.phone : ""}</span>
-                          <button className="ib" onClick={() => removeEvidence(o.id, "references", r.id)}><Trash2 size={12} /></button>
-                        </div>
-                      ))}
-                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" && (
-                        <ReferenceForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "references", entry); setEvidenceForm(null); }} />
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Contact / harassment log</span>
-                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" ? null : { obligId: o.id, kind: "incident" })}><Plus size={14} /></button>
-                      </div>
-                      {(o.incidents || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident") && <div className="foot">Nothing logged yet.</div>}
-                      {[...(o.incidents || [])].sort((a, b) => b.date.localeCompare(a.date)).map(i => (
-                        <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 12, color: C.muted }}>
-                            {i.date} — {i.channel} to {i.target}{i.refName ? ` (${i.refName})` : ""}{i.agentName ? `, from ${i.agentName}` : ""}{i.recorded ? " · recorded" : ""}
-                            {i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}
-                          </span>
-                          <button className="ib" onClick={() => removeEvidence(o.id, "incidents", i.id)}><Trash2 size={12} /></button>
-                        </div>
-                      ))}
-                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" && (
-                        <IncidentForm references={o.references || []} workplaceContact={o.workplaceContact}
-                          onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Complaints filed</span>
-                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" ? null : { obligId: o.id, kind: "complaint" })}><Plus size={14} /></button>
-                      </div>
-                      {(o.complaints || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint") && <div className="foot">Nothing filed yet.</div>}
-                      {[...(o.complaints || [])].sort((a, b) => b.date.localeCompare(a.date)).map(c => (
-                        <div key={c.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 12, color: C.muted }}>{c.date} — {c.filedWith} [{c.status}]{c.refNumber ? " · ref " + c.refNumber : ""}{c.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{c.notes}</span> : null}</span>
-                          <button className="ib" onClick={() => removeEvidence(o.id, "complaints", c.id)}><Trash2 size={12} /></button>
-                        </div>
-                      ))}
-                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" && (
-                        <ComplaintForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "complaints", entry); setEvidenceForm(null); }} />
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Settlement offers</span>
-                        <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" ? null : { obligId: o.id, kind: "settlement" })}><Plus size={14} /></button>
-                      </div>
-                      {(o.settlements || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement") && <div className="foot">None logged yet.</div>}
-                      {[...(o.settlements || [])].sort((a, b) => b.date.localeCompare(a.date)).map(s => (
-                        <div key={s.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                          <span style={{ fontSize: 12, color: C.muted }}>{s.date} — offered {inr(s.offeredAmount)}{s.accepted ? " (accepted)" : ""}{s.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{s.notes}</span> : null}</span>
-                          <button className="ib" onClick={() => removeEvidence(o.id, "settlements", s.id)}><Trash2 size={12} /></button>
-                        </div>
-                      ))}
-                      {evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" && (
-                        <SettlementForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "settlements", entry); setEvidenceForm(null); }} />
-                      )}
-                    </div>
-                  </div>
-                )}
-                {minVsFull && (
-                  <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10 }}>
-                    <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}><AlertTriangle size={13} color={C.coral} /> If you only pay the ~5% minimum due</div>
-                    <div className="row" style={{ justifyContent: "space-between" }}>
-                      <span style={{ fontSize: 12 }}>Minimum only</span>
-                      <span className="num" style={{ fontSize: 12, color: C.coral }}>{minVsFull.min.months ? minVsFull.min.months + " mo" : "50+ yrs"} · {inr(minVsFull.min.totalInterest)} interest</span>
-                    </div>
-                    <div className="row" style={{ justifyContent: "space-between", marginTop: 3 }}>
-                      <span style={{ fontSize: 12 }}>Clear it in 6 months instead</span>
-                      <span className="num" style={{ fontSize: 12, color: C.teal }}>{inr(minVsFull.fixed6.payment)}/mo · {inr(minVsFull.fixed6.totalInterest)} interest</span>
-                    </div>
-                  </div>
-                )}
-                {payFor === o.id && <PayForm accounts={accounts} onPay={(amt, acc, note) => pay(o.id, amt, acc, note)} onCancel={() => setPayFor(null)} />}
-                {settleFor === o.id && <SettleForm accounts={accounts} outstanding={+o.outstanding || 0} onSettle={(amt, acc, note) => settle(o.id, amt, acc, note)} onCancel={() => setSettleFor(null)} />}
-              </div>
-            );
-          })}
-        </div>
-      ))}
-      <div className="foot">Row fields: outstanding · monthly amount · due day. "Monthly" and "due day" drive the week-ahead reminder on Home. Log a payment and it comes off the balance (and the account, if you pick one).</div>
+      <div className="foot">Tap "Edit" on any debt to set outstanding, monthly amount, due day, APR, and everything else. "Monthly" and "due day" drive the week-ahead reminder on Home. Log a payment and it comes off the balance (and the account, if you pick one).</div>
     </div>
   );
 }
