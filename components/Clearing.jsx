@@ -416,7 +416,7 @@ export default function Clearing({ userId }) {
   // Once that's true, what used to go to those minimum payments is suggested toward family/friends
   // first, since those carry relationship weight that a pure interest-rate strategy ignores.
   const openPayday = oblig.filter(o => o.type === "payday" && o.status !== "closed" && o.status !== "settled");
-  const paydayUnderControl = oblig.some(o => o.type === "payday") && openPayday.length === 0;
+  const paydayUnderControl = openPayday.length === 0;
   const freedMonthly = oblig.filter(o => o.status === "closed" || o.status === "settled").reduce((s, o) => s + (+o.monthly || 0), 0);
   const openFamily = oblig.filter(o => o.type === "family" && o.status !== "closed" && o.status !== "settled");
 
