@@ -192,9 +192,14 @@ const CHART_PALETTE = ["#0052CC", "#00875A", "#E67E22", "#8F4800", "#6554C0", "#
 function buildPayoffPlan(oblig, extraMonthly, strategy) {
   const open = oblig
     .filter(o => o.status !== "closed" && (+o.outstanding || 0) > 0)
-    .map(o => ({ id: o.id, name: o.name, type: o.type, balance: +o.outstanding || 0, apr: +o.apr || 0, minPay: +o.monthly || 0 }));
+    .map(o => ({ id: o.id, name: o.name, type: o.type, balance: +o.outstanding || 0, apr: +o.apr || 0, minPay: +o.monthly || 0, priority: o.priority ?? null }));
   if (open.length === 0) return { order: [], months: 0, totalInterest: 0, debtFreeDate: new Date(), insufficient: false };
-  const rank = [...open].sort((a, b) => strategy === "avalanche" ? b.apr - a.apr : a.balance - b.balance);
+  // Anything you've manually pinned goes to the front, in the order you pinned it — avalanche/
+  // snowball only decides the order for whatever's left. Interest-rate math can't know that a
+  // particular family loan matters more to you than the APR says it should; this is how you tell it.
+  const pinned = open.filter(o => o.priority != null).sort((a, b) => a.priority - b.priority);
+  const unpinned = open.filter(o => o.priority == null).sort((a, b) => strategy === "avalanche" ? b.apr - a.apr : a.balance - b.balance);
+  const rank = [...pinned, ...unpinned];
   const sim = rank.map(o => ({ ...o }));
   const clearedAt = {};
   let month = 0, totalInterest = 0;
@@ -436,6 +441,24 @@ export default function Clearing({ userId }) {
     setCelebrate(step.streak > 1 ? `₹${amt} into your war chest — ${step.streak} in a row.` : `₹${amt} into your war chest.`);
   }
 
+  // One-tap version of "pin every open family/friend debt to the top" — what the money-freed
+  // card offers once payday loans are out of the way. Smallest balance first among them, so the
+  // first relationship gets cleared fastest; strategy still decides everything else beneath them.
+  function prioritizeFamily() {
+    setOblig(x => {
+      const openFam = x.filter(o => o.type === "family" && o.status !== "closed" && o.status !== "settled")
+        .sort((a, b) => (+a.outstanding || 0) - (+b.outstanding || 0));
+      if (openFam.length === 0) return x;
+      const minP = Math.min(0, ...x.map(o => o.priority ?? 0));
+      const order = openFam.map(o => o.id);
+      return x.map(o => {
+        const idx = order.indexOf(o.id);
+        return idx === -1 ? o : { ...o, priority: minP - openFam.length + idx };
+      });
+    });
+    setCelebrate("Family & friends moved to the top of the attack order.");
+  }
+
   function exportData() {
     const data = { app: "clearing", v: 1, savedAt: new Date().toISOString(), accounts, oblig, expenses, payments, incomes, settings };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
@@ -515,7 +538,7 @@ export default function Clearing({ userId }) {
           {notif === "granted" ? <BellRing size={22} /> : <Bell size={22} />}</button>
       </div>
 
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "home" && (
         <div className="card" style={{ marginTop: 14 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Your data</div>
@@ -549,7 +572,7 @@ export default function Clearing({ userId }) {
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab }) {
+function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
   return (
     <div style={{ display: "grid", gap: 14 }}>
       {debtPlan && debtPlan.order.length > 0 && (
@@ -609,7 +632,7 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
             {openFamily.length > 0 ? " Worth putting toward family & friends next." : ""}
           </div>
           {openFamily.length > 0 && (
-            <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 10, fontSize: 12 }}>Redirect it on the Clear tab →</button>
+            <button className="btn ghost" onClick={() => { prioritizeFamily(); setTab("clear"); }} style={{ marginTop: 10, fontSize: 12 }}>Prioritize family & friends now →</button>
           )}
         </div>
       )}
@@ -1097,6 +1120,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   // Which type-groups' cleared debts are expanded — closed/settled debts sink to the bottom of
   // their group and stay collapsed by default, so the default view is just what's still pending.
   const [showClosed, setShowClosed] = useState({});
+  const [deltaExtra, setDeltaExtra] = useState(5000);
   function clearAllDebts() {
     setOblig([]);
     setPayments([]);
@@ -1113,6 +1137,9 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const extra = settings.extraMonthly || 0;
   const suggestedExtra = Math.max(0, Math.round((safeToSpend || 0) - (+settings.buffer || 0)));
   const plan = useMemo(() => buildPayoffPlan(oblig, +extra || 0, strategy), [oblig, extra, strategy]);
+  // Same plan, with a bit more thrown at it each month — answers "what if I added ₹X more?"
+  // without having to manually change the extra field and remember what the date used to be.
+  const deltaPlan = useMemo(() => buildPayoffPlan(oblig, (+extra || 0) + (+deltaExtra || 0), strategy), [oblig, extra, deltaExtra, strategy]);
   const add = (o) =>{ setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
   const upd = (id, p) => setOblig(x => x.map(o => o.id === id ? { ...o, ...p } : o));
   const rm = (id) => {
@@ -1179,6 +1206,17 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     }));
     if (p.accountId) setAccounts(x => x.map(a => a.id === p.accountId ? { ...a, balance: (+a.balance || 0) + amt } : a));
     onCelebrate("Payment removed — you can log it again if you re-add it correctly.");
+  }
+  // Pins a debt to the front of the attack order, ahead of whatever avalanche/snowball would pick.
+  // Each tap goes to the very top of the pinned group — last pinned, first attacked.
+  function prioritize(id) {
+    setOblig(x => {
+      const minP = Math.min(0, ...x.map(o => o.priority ?? 0));
+      return x.map(o => o.id === id ? { ...o, priority: minP - 1 } : o);
+    });
+  }
+  function unprioritize(id) {
+    setOblig(x => x.map(o => o.id === id ? { ...o, priority: null } : o));
   }
   function addEvidence(id, key, entry) {
     setOblig(x => x.map(o => o.id === id ? { ...o, [key]: [...(o[key] || []), { ...entry, id: crypto.randomUUID() }] } : o));
@@ -1308,6 +1346,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <span style={{ fontSize: 14, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
+                    {o.priority != null && <span className="chip" style={{ background: C.violet, color: "#fff" }}>your priority</span>}
                     {od.overdue && <span className="chip" style={{ background: C.coral, color: "#fff" }}>overdue{od.daysLate ? " " + od.daysLate + "d" : ""}</span>}
                     {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
                     {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
@@ -1406,6 +1445,10 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Workplace contact (optional)" value={o.workplaceContact || ""} onChange={e => upd(o.id, { workplaceContact: e.target.value })} />
                     </div>
                     <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <button className="chip" onClick={() => o.priority != null ? unprioritize(o.id) : prioritize(o.id)}
+                        style={{ background: "transparent", border: "1px solid " + (o.priority != null ? C.violet : C.line), color: o.priority != null ? C.violet : C.muted, cursor: "pointer" }}>
+                        {o.priority != null ? "✓ your priority — tap to unpin" : "attack this first, regardless of strategy"}
+                      </button>
                       <button className="chip" onClick={() => upd(o.id, { cibilImpact: !o.cibilImpact })} style={{ background: "transparent", border: "1px solid " + (o.cibilImpact ? C.amber : C.line), color: o.cibilImpact ? C.amber : C.muted, cursor: "pointer" }}>CIBIL</button>
                       <button className="chip" onClick={() => upd(o.id, { harassment: !o.harassment })} style={{ background: "transparent", border: "1px solid " + (o.harassment ? C.coral : C.line), color: o.harassment ? C.coral : C.muted, cursor: "pointer" }}>calls</button>
                       <button className="chip" onClick={() => upd(o.id, { paymentType: o.paymentType === "onetime" ? "installments" : "onetime" })} style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer" }}>{o.paymentType === "onetime" ? "one-time" : "installments"}</button>
@@ -1568,6 +1611,32 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                   <span style={{ fontSize: 13, color: C.muted }}>Interest along the way</span>
                   <span className="num">{inr(plan.totalInterest)}</span>
                 </div>
+                <div style={{ marginTop: 12, background: C.surface2, borderRadius: 10, padding: 10 }}>
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 12.5, color: C.muted }}>What if I added</span>
+                    <input className="in num" type="number" value={deltaExtra || ""} onChange={e => setDeltaExtra(+e.target.value)}
+                      style={{ width: 90, padding: "5px 8px", fontSize: 13 }} />
+                    <span style={{ fontSize: 12.5, color: C.muted }}>more/month?</span>
+                  </div>
+                  {deltaExtra > 0 && (
+                    deltaPlan.insufficient || deltaPlan.order.length === 0 ? (
+                      <div className="foot" style={{ marginTop: 6 }}>Not enough to project — try a smaller or larger amount.</div>
+                    ) : (
+                      <div style={{ marginTop: 8 }}>
+                        <div className="row" style={{ justifyContent: "space-between" }}>
+                          <span style={{ fontSize: 13 }}>Debt-free</span>
+                          <span className="num" style={{ fontWeight: 700, color: C.teal }}>
+                            {plan.months - deltaPlan.months > 0 ? `${plan.months - deltaPlan.months} mo sooner` : "same timeline"} · {fmtMonthYear(deltaPlan.debtFreeDate)}
+                          </span>
+                        </div>
+                        <div className="row" style={{ justifyContent: "space-between", marginTop: 3 }}>
+                          <span style={{ fontSize: 13 }}>Interest saved</span>
+                          <span className="num" style={{ color: C.teal }}>{inr(Math.max(0, plan.totalInterest - deltaPlan.totalInterest))}</span>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -1579,13 +1648,14 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                   <div className="row" style={{ gap: 8 }}>
                     <span className="chip" style={{ background: i === 0 ? C.primary : C.line, color: i === 0 ? "#fff" : C.muted, width: 20, height: 20, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>{i + 1}</span>
                     <span style={{ fontSize: 13 }}>{o.name}</span>
+                    {o.priority != null && <span className="chip" style={{ background: "transparent", border: "1px solid " + C.violet, color: C.violet }}>your pick</span>}
                   </div>
                   <span style={{ fontSize: 12, color: C.faint }}>{o.monthCleared ? "cleared mo. " + o.monthCleared : "—"}</span>
                 </div>
               ))}
             </div>
           )}
-          <div className="foot" style={{ marginTop: 10 }}>{strategy === "avalanche" ? "Avalanche pays the least interest overall — best if you can stick with it." : "Snowball clears small debts first for quick wins — good if you need momentum."} Extra payments go to the top of the list; once it's cleared, extra rolls to the next.</div>
+          <div className="foot" style={{ marginTop: 10 }}>{strategy === "avalanche" ? "Avalanche pays the least interest overall — best if you can stick with it." : "Snowball clears small debts first for quick wins — good if you need momentum."} Anything you've pinned as "your priority" jumps ahead of the strategy entirely. Extra payments go to the top of the list; once it's cleared, extra rolls to the next.</div>
         </div>
       )}
 
