@@ -13,11 +13,16 @@ import {
 // "Zenith Finance" design system — Clarity through Calm. Primary Blue drives brand/actions/nav;
 // Success Green is reserved specifically for positive balances and cleared debts; Warning Orange
 // and Danger Red flag things that need attention, sparingly, so they keep their meaning.
+// Palette from your coolors board (Columbia Blue / Cadet Grey / Charcoal / Nyanza / Tomato), mapped
+// where it fits directly — cream background, blue-gray secondary surface, charcoal-slate primary,
+// tomato-red danger. Two deliberate exceptions: this app leans on color to mean "cleared" vs
+// "overdue" vs "due soon", and the 5-color board has no clear green or second warning hue, so those
+// two stay close to the app's original values rather than being forced into the board's palette.
 const C = {
-  bg: "#F9F9FF", surface: "#FFFFFF", surface2: "#E8EDFF", line: "#C3C6D6",
-  text: "#041B3C", muted: "#434654", faint: "#737685",
-  primary: "#0052CC", teal: "#00875A", amber: "#E67E22", coral: "#DE350B", violet: "#8F4800",
-  inverse: "#1D3052", onInverse: "#EDF0FF",
+  bg: "#EEF5DB", surface: "#FFFFFF", surface2: "#B8D8D8", line: "#C7DBDB",
+  text: "#2C3E42", muted: "#7A9E9F", faint: "#9DB8B8",
+  primary: "#4F6367", teal: "#3F8B6F", amber: "#DC9245", coral: "#E5473D", violet: "#6B5B8E",
+  inverse: "#26363A", onInverse: "#EEF5DB",
 };
 const PURPOSE = {
   income: { label: "Income", color: C.teal }, living: { label: "Living", color: C.amber }, debt: { label: "Debt", color: C.violet },
@@ -122,6 +127,33 @@ function daysUntil(day) {
 }
 
 function addMonths(d, n) { const r = new Date(d); r.setMonth(r.getMonth() + n); return r; }
+
+// War chest helpers — the "period key" for a date is either the date itself (daily cadence) or
+// that week's Monday (weekly cadence), so two logs land in the "same period" regardless of which
+// day of the week they happened on.
+function warChestPeriodKey(cadence, dateStr) {
+  const d = new Date(dateStr);
+  if (cadence === "weekly") {
+    const day = d.getDay(); const diff = (day === 0 ? -6 : 1) - day;
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff).toISOString().slice(0, 10);
+  }
+  return dateStr;
+}
+// Returns null if this period was already logged (nothing to do), otherwise the new
+// lastLoggedDate/streak to write back — streak continues only if the previous log was the
+// immediately preceding period, otherwise it restarts at 1.
+function nextWarChestLog(wc, todayStr) {
+  const todayKey = warChestPeriodKey(wc.cadence, todayStr);
+  const lastKey = wc.lastLoggedDate ? warChestPeriodKey(wc.cadence, wc.lastLoggedDate) : null;
+  if (lastKey === todayKey) return null;
+  const back = wc.cadence === "weekly" ? 7 : 1;
+  const d = new Date(todayKey); d.setDate(d.getDate() - back);
+  const expectedPrevKey = d.toISOString().slice(0, 10);
+  return { lastLoggedDate: todayStr, streak: lastKey === expectedPrevKey ? (+wc.streak || 0) + 1 : 1 };
+}
+function buildUpiLink(vpa, amount, note) {
+  return `upi://pay?pa=${encodeURIComponent(vpa)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note || "War chest")}`;
+}
 
 /* Is this debt past its due day with nothing paid since that due date? daysUntil() alone can't
    answer this — once the day passes it just rolls forward to next month, which quietly hides
@@ -374,7 +406,35 @@ export default function Clearing({ userId }) {
   const debtExtra = +settings.extraMonthly || 0;
   const debtPlan = useMemo(() => buildPayoffPlan(oblig, debtExtra, debtStrategy), [oblig, debtExtra, debtStrategy]);
 
+  // "Money freed" only means something once the highest-risk debt is actually handled — surfacing
+  // it while payday loans are still open would read as permission to relax before it's safe to.
+  // Once that's true, what used to go to those minimum payments is suggested toward family/friends
+  // first, since those carry relationship weight that a pure interest-rate strategy ignores.
+  const openPayday = oblig.filter(o => o.type === "payday" && o.status !== "closed" && o.status !== "settled");
+  const paydayUnderControl = oblig.some(o => o.type === "payday") && openPayday.length === 0;
+  const freedMonthly = oblig.filter(o => o.status === "closed" || o.status === "settled").reduce((s, o) => s + (+o.monthly || 0), 0);
+  const openFamily = oblig.filter(o => o.type === "family" && o.status !== "closed" && o.status !== "settled");
+
   async function askNotif() { if (typeof Notification !== "undefined") setNotif(await Notification.requestPermission()); }
+
+  // Logs one war-chest contribution: moves the target amount from the source account into the
+  // war-chest account and advances the streak. This never touches a real bank — it's the same
+  // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
+  // optional UPI deep link) is still on the person, this just keeps score.
+  function logWarChest(accountId) {
+    const today = new Date().toISOString().slice(0, 10);
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc || !acc.warChest?.on) return;
+    const step = nextWarChestLog(acc.warChest, today);
+    if (!step) return; // already logged this period
+    const amt = +acc.warChest.target || 0;
+    setAccounts(list => list.map(a => {
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step } };
+      if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
+      return a;
+    }));
+    setCelebrate(step.streak > 1 ? `₹${amt} into your war chest — ${step.streak} in a row.` : `₹${amt} into your war chest.`);
+  }
 
   function exportData() {
     const data = { app: "clearing", v: 1, savedAt: new Date().toISOString(), accounts, oblig, expenses, payments, incomes, settings };
@@ -455,7 +515,7 @@ export default function Clearing({ userId }) {
           {notif === "granted" ? <BellRing size={22} /> : <Bell size={22} />}</button>
       </div>
 
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab }} />}
       {tab === "home" && (
         <div className="card" style={{ marginTop: 14 }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Your data</div>
@@ -489,7 +549,7 @@ export default function Clearing({ userId }) {
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan }) {
+function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab }) {
   return (
     <div style={{ display: "grid", gap: 14 }}>
       {debtPlan && debtPlan.order.length > 0 && (
@@ -505,6 +565,51 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
               <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{fmtMonthYear(debtPlan.debtFreeDate)}</div>
               <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{debtPlan.months} {debtPlan.months === 1 ? "month" : "months"} away, attacking <b>{debtPlan.order[0].name}</b> first</div>
             </>
+          )}
+        </div>
+      )}
+      {(() => {
+        const wcAccount = accounts.find(a => a.warChest?.on);
+        if (!wcAccount) return null;
+        const wc = wcAccount.warChest;
+        const today = new Date().toISOString().slice(0, 10);
+        const alreadyLogged = !nextWarChestLog(wc, today);
+        const upiLink = wc.vpa ? buildUpiLink(wc.vpa, wc.target, "War chest") : null;
+        return (
+          <div className="card">
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div className="lbl" style={{ margin: 0 }}>War chest — {wcAccount.name}</div>
+              {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
+            </div>
+            <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>saved toward friends & family so far</div>
+            <div className="row" style={{ gap: 8, marginTop: 10 }}>
+              {upiLink && !alreadyLogged && (
+                <a href={upiLink} style={{ textDecoration: "none", flex: 1 }}>
+                  <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{wc.target} via UPI</div>
+                </a>
+              )}
+              <button className="btn" disabled={alreadyLogged} onClick={() => logWarChest(wcAccount.id)}
+                style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
+                {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log today's ₹${wc.target}`}
+              </button>
+            </div>
+            {(+wcAccount.balance || 0) > 0 && (
+              <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
+            )}
+          </div>
+        );
+      })()}
+      {paydayUnderControl && freedMonthly > 0 && (
+        <div className="card" style={{ border: "1px solid " + C.teal }}>
+          <div className="lbl">Money freed up each month</div>
+          <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4, color: C.teal }}>{inr(freedMonthly)}</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+            No payday loans left open — the monthly payments that used to go to them are free now.
+            {openFamily.length > 0 ? " Worth putting toward family & friends next." : ""}
+          </div>
+          {openFamily.length > 0 && (
+            <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 10, fontSize: 12 }}>Redirect it on the Clear tab →</button>
           )}
         </div>
       )}
@@ -701,6 +806,30 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes 
             {a.isCash ? "✓ physical cash" : "mark as physical cash"}
           </button>
           {a.isCash && <div className="foot" style={{ marginTop: 4 }}>Never shown below ₹0 — you can't hold negative cash. If it keeps hitting zero, use "correct to actual" below to reset it to what's really in your wallet.</div>}
+          <button className="chip" onClick={() => upd(a.id, { warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}
+            style={{ marginTop: 6, background: "transparent", border: "1px solid " + (a.warChest?.on ? C.violet : C.line), color: a.warChest?.on ? C.violet : C.muted, cursor: "pointer" }}>
+            {a.warChest?.on ? "✓ war chest" : "use as war chest"}
+          </button>
+          {a.warChest?.on && (
+            <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10, display: "grid", gap: 8 }}>
+              <div className="foot">Small, steady amounts you set aside here to put toward friends & family debt later. This only tracks the number — actually moving the money each day/week is on you, same as everything else in this app.</div>
+              <div className="row" style={{ gap: 8 }}>
+                <div style={{ flex: 1 }}><span className="lbl" style={{ marginBottom: 2 }}>Amount</span>
+                  <input className="in num" style={{ padding: "6px 8px", fontSize: 13 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, target: +e.target.value } })} /></div>
+                <div className="row" style={{ gap: 4 }}>
+                  <button className="btn ghost" onClick={() => upd(a.id, { warChest: { ...a.warChest, cadence: "daily" } })} style={{ padding: "6px 10px", fontSize: 12, borderColor: a.warChest.cadence === "daily" ? C.violet : C.line, color: a.warChest.cadence === "daily" ? C.violet : C.muted }}>per day</button>
+                  <button className="btn ghost" onClick={() => upd(a.id, { warChest: { ...a.warChest, cadence: "weekly" } })} style={{ padding: "6px 10px", fontSize: 12, borderColor: a.warChest.cadence === "weekly" ? C.violet : C.line, color: a.warChest.cadence === "weekly" ? C.violet : C.muted }}>per week</button>
+                </div>
+              </div>
+              {accounts.length > 1 && (
+                <select className="in" style={{ padding: "6px 8px", fontSize: 13 }} value={a.warChest.fromAccountId || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
+                  <option value="">Move from… (which account this comes out of)</option>
+                  {accounts.filter(x => x.id !== a.id).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+              )}
+              <input className="in" style={{ padding: "6px 8px", fontSize: 13 }} placeholder="Your UPI ID for this account (optional — lets Home open a pre-filled transfer)" value={a.warChest.vpa || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, vpa: e.target.value } })} />
+            </div>
+          )}
           {reconc === a.id && <ReconcileForm current={+a.balance || 0} onSave={(actual) => reconcile(a.id, actual)} onCancel={() => setReconc(null)} />}
         </div>
       ))}
@@ -965,6 +1094,9 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [search, setSearch] = useState("");
+  // Which type-groups' cleared debts are expanded — closed/settled debts sink to the bottom of
+  // their group and stay collapsed by default, so the default view is just what's still pending.
+  const [showClosed, setShowClosed] = useState({});
   function clearAllDebts() {
     setOblig([]);
     setPayments([]);
@@ -1065,9 +1197,16 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   }
   const groups = Object.keys(OTYPE).map(t => ({ t, items: oblig.filter(o => o.type === t) }));
   const q = search.trim().toLowerCase();
-  const searchedGroups = q
+  const filteredGroups = q
     ? groups.map(g => ({ ...g, items: g.items.filter(o => (o.name || "").toLowerCase().includes(q) || (o.legalName || "").toLowerCase().includes(q)) }))
     : groups;
+  // Closed/settled debts sink to the bottom of each group and stay collapsed behind a toggle —
+  // the default Clear tab view should only show what's still actually pending.
+  const searchedGroups = filteredGroups.map(g => ({
+    ...g,
+    open: g.items.filter(o => o.status !== "closed" && o.status !== "settled"),
+    closed: g.items.filter(o => o.status === "closed" || o.status === "settled"),
+  }));
   const noMatches = q && searchedGroups.every(g => g.items.length === 0);
   const owed = t => oblig.filter(o => o.type === t && o.status !== "closed").reduce((s, o) => s + (+o.outstanding || 0), 0);
   const totalOwed = owed("regulated") + owed("payday") + owed("family");
@@ -1146,13 +1285,13 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
       )}
 
       {noMatches && <div className="card"><Empty>No loan or person matches "{search}".</Empty></div>}
-      {searchedGroups.map(({ t, items }) => items.length > 0 && (
+      {searchedGroups.map(({ t, open, closed }) => (open.length > 0 || closed.length > 0) && (
         <div className="card" key={t}>
           <div className="row" style={{ gap: 8, marginBottom: 8 }}>
             {(() => { const I = OTYPE[t].icon; return <I size={16} color={OTYPE[t].color} />; })()}
             <span style={{ fontSize: 12, fontWeight: 700, color: OTYPE[t].color, textTransform: "uppercase", letterSpacing: ".03em" }}>{OTYPE[t].label}</span>
           </div>
-          {items.map(o => {
+          {(showClosed[t] ? [...open, ...closed] : open).map(o => {
             const total = (+o.outstanding || 0) + (+o.paid || 0);
             const pct = total > 0 ? (o.paid / total) * 100 : (o.status === "closed" || o.status === "settled" ? 100 : 0);
             const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
@@ -1379,6 +1518,12 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
               </div>
             );
           })}
+          {closed.length > 0 && (
+            <button className="chip" onClick={() => setShowClosed(s => ({ ...s, [t]: !s[t] }))}
+              style={{ marginTop: 4, background: "transparent", border: "1px solid " + C.line, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              {showClosed[t] ? "Hide" : "Show"} {closed.length} cleared {closed.length === 1 ? "debt" : "debts"} {showClosed[t] ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </button>
+          )}
         </div>
       ))}
 
