@@ -24,8 +24,11 @@ const C = {
   primary: "#4F6367", teal: "#3F8B6F", amber: "#DC9245", coral: "#E5473D", violet: "#6B5B8E",
   inverse: "#26363A", onInverse: "#EEF5DB",
 };
+// Keys (income/living/debt) are unchanged for saved-data compatibility — only the displayed
+// labels changed, from abstract category names to what the tag actually does: pick the default
+// account for a form. "Debt" here means "accounts", never the loans on the Clear tab.
 const PURPOSE = {
-  income: { label: "Income", color: C.teal }, living: { label: "Living", color: C.amber }, debt: { label: "Debt", color: C.violet },
+  income: { label: "Salary lands here", color: C.teal }, living: { label: "Everyday spending", color: C.amber }, debt: { label: "Pay debts from here", color: C.violet },
 };
 const OTYPE = {
   regulated: { label: "Marked Regulated", short: "Marked Regulated", color: C.primary, icon: ShieldCheck },
@@ -552,7 +555,7 @@ export default function Clearing({ userId }) {
           </div>
         </div>
       )}
-      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }} />}
+      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, setIncomes, settings, setSettings }} />}
       {tab === "activity" && <Activity {...{ expenses, payments, incomes, oblig, accounts }} />}
       {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
@@ -760,7 +763,7 @@ function ChartLegend({ items }) {
   );
 }
 
-function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes }) {
+function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes, settings, setSettings }) {
   const [adding, setAdding] = useState(false);
   const [moving, setMoving] = useState(false);
   const [income, setIncome] = useState(false);
@@ -784,9 +787,19 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes 
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
+      {!settings.seenAccountsIntro && (
+        <div className="card" style={{ border: "1px solid " + C.line }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>This tab is separate from Clear, on purpose</div>
+          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
+            Clear tracks what you owe. This tracks what you actually have — your bank balance, your cash. Different questions, different tabs.
+            They only touch when you log a payment: pick an account there (optional) and this balance updates with it, which is what keeps "Safe to spend" on Home accurate. Skip it and Clear still works fine — you just won't get that number.
+          </div>
+          <button className="btn" onClick={() => setSettings(s => ({ ...s, seenAccountsIntro: true }))} style={{ marginTop: 10, padding: "7px 14px", fontSize: 13 }}>Got it</button>
+        </div>
+      )}
       {accounts.length === 0 && (
-        <div className="card"><div style={{ fontWeight: 600, marginBottom: 6 }}>Set up your accounts</div>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Add the accounts you actually hold money in. The idea: salary lands in Income, you move living costs to a Spending account, and pay debts from a third. Keeping them separate is how you stay in control.</div>
+        <div className="card"><div style={{ fontWeight: 600, marginBottom: 6 }}>Add your first account</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Add each real place you hold money — your bank account, your wallet cash, whatever else. One is enough to get started; split into more only if you want per-account accuracy.</div>
           <button className="btn" onClick={seed}>Add starter accounts</button></div>
       )}
       <div className="card" style={{ background: C.surface2 }}>
@@ -800,6 +813,7 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes 
             </div>
           ))}
         </div>
+        <div className="foot" style={{ marginTop: 8 }}>These three groups are optional — just so you can see at a glance where money sits. Tagging an account below doesn't change anything except which one gets pre-picked in a few forms.</div>
       </div>
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" onClick={() => setIncome(true)} style={{ flex: 1 }}><Plus size={16} /> Add income</button>
