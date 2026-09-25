@@ -9,12 +9,12 @@ import Clearing from "../components/Clearing";
 const OWNER_EMAIL = (process.env.NEXT_PUBLIC_OWNER_EMAIL || "").toLowerCase();
 
 const C = {
-  bg: "#EEF5DB", surface: "#FFFFFF", line: "#C7DBDB", text: "#2C3E42", muted: "#7A9E9F", faint: "#9DB8B8",
-  primary: "#4F6367", teal: "#3F8B6F", coral: "#E5473D",
+  bg: "#F5F1EA", surface: "#FFFFFF", line: "#E4DCCF", text: "#1D2B2F", muted: "#5F6B6E", faint: "#8E979A",
+  primary: "#1F4D46", teal: "#2E7D5B", coral: "#C4553D",
 };
 const shell = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Inter',system-ui,sans-serif", padding: 20, background: C.bg };
-const card = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 16, padding: 26, width: "100%", maxWidth: 380 };
-const btn = { width: "100%", marginTop: 12, padding: "12px", borderRadius: 8, border: "none", background: C.primary, color: "#fff", fontWeight: 600, fontSize: 15, cursor: "pointer" };
+const card = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 20, padding: 26, width: "100%", maxWidth: 380 };
+const btn = { width: "100%", marginTop: 12, padding: "12px", borderRadius: 12, border: "none", background: C.primary, color: "#fff", fontWeight: 600, fontSize: 15, cursor: "pointer" };
 
 export default function Page() {
   const [session, setSession] = useState(undefined); // undefined = loading
@@ -50,7 +50,7 @@ export default function Page() {
   if (!session) {
     return (
       <div style={shell}><div style={card}>
-        <div style={{ fontFamily: "'Work Sans',system-ui,sans-serif", fontSize: 24, fontWeight: 700, color: C.text }}>Clearing</div>
+        <div style={{ fontFamily: "'Fraunces',Georgia,serif", fontSize: 28, fontWeight: 600, color: C.text }}>Clearing</div>
         <div style={{ fontSize: 14, color: C.muted, marginTop: 4, marginBottom: 20 }}>Sign in with your email — we'll send a one-tap link.</div>
         {sent ? <div style={{ fontSize: 14, color: C.teal, fontWeight: 600 }}>Check your inbox for the sign-in link.</div> : (
           <>

@@ -12,24 +12,20 @@ import {
    and paying back friends, family, and loans. Persists to Supabase (user_state.data jsonb) per signed-in user. */
 
 // "Zenith Finance" design system — Clarity through Calm. Primary Blue drives brand/actions/nav;
-// Success Green is reserved specifically for positive balances and cleared debts; Warning Orange
-// and Danger Red flag things that need attention, sparingly, so they keep their meaning.
-// Palette from your coolors board (Columbia Blue / Cadet Grey / Charcoal / Nyanza / Tomato), mapped
-// where it fits directly — cream background, blue-gray secondary surface, charcoal-slate primary,
-// tomato-red danger. Two deliberate exceptions: this app leans on color to mean "cleared" vs
-// "overdue" vs "due soon", and the 5-color board has no clear green or second warning hue, so those
-// two stay close to the app's original values rather than being forced into the board's palette.
+// Palette: warm ivory paper, deep forest-green primary, and muted earth accents — calm rather
+// than loud. Green = money in / cleared, terracotta = over or overdue, ochre = everyday spending,
+// plum = debt repayments. Headings and figures use Fraunces; body text uses Inter.
 const C = {
-  bg: "#EEF5DB", surface: "#FFFFFF", surface2: "#B8D8D8", line: "#C7DBDB",
-  text: "#2C3E42", muted: "#7A9E9F", faint: "#9DB8B8",
-  primary: "#4F6367", teal: "#3F8B6F", amber: "#DC9245", coral: "#E5473D", violet: "#6B5B8E",
-  inverse: "#26363A", onInverse: "#EEF5DB",
+  bg: "#F5F1EA", surface: "#FFFFFF", surface2: "#EFE9DF", line: "#E4DCCF",
+  text: "#1D2B2F", muted: "#5F6B6E", faint: "#8E979A",
+  primary: "#1F4D46", teal: "#2E7D5B", amber: "#C38A2E", coral: "#C4553D", violet: "#6A5A93",
+  inverse: "#1F3A36", onInverse: "#F5F1EA",
 };
 // Keys (income/living/debt) are unchanged for saved-data compatibility — only the displayed
 // labels changed, from abstract category names to what the tag actually does: pick the default
 // account for a form. "Debt" here means "accounts", never the loans on the Clear tab.
 const PURPOSE = {
-  income: { label: "Salary lands here", color: C.teal }, living: { label: "Everyday spending", color: C.amber }, debt: { label: "Pay debts from here", color: C.violet },
+  income: { label: "Salary lands here", short: "Salary", color: C.teal }, living: { label: "Everyday spending", short: "Spending", color: C.amber }, debt: { label: "Pay debts from here", short: "Debt", color: C.violet },
 };
 const OTYPE = {
   regulated: { label: "Marked Regulated", short: "Marked Regulated", color: C.primary, icon: ShieldCheck },
@@ -126,7 +122,7 @@ function periodStart(period) {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 function inPeriod(dateStr, period) { return new Date(dateStr) >= periodStart(period); }
-const CHART_PALETTE = ["#0052CC", "#00875A", "#E67E22", "#8F4800", "#6554C0", "#DE350B", "#00B8D9", "#5243AA", "#36B37E", "#FF8B00"];
+const CHART_PALETTE = ["#1F4D46", "#C38A2E", "#C4553D", "#3E8DA0", "#8BA356", "#B5698A", "#7C6650", "#4F6D93", "#D0A86A", "#A59E93"];
 
 /* Avalanche = highest APR first (least total interest). Snowball = smallest balance first (fastest early wins).
    Extra money each month goes to the top of the order; once a debt clears, its share rolls to the next. */
@@ -392,8 +388,45 @@ export default function Clearing({ userId }) {
     setIncomes(x => [...x, { id: crypto.randomUUID(), amount, source: source || "Other", note: note || "", date: date || localDay(), accountId: accountId || "" }]);
     if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) + amount } : a));
   };
-  const [quickAdd, setQuickAdd] = useState(false);
+  const [quickAdd, setQuickAdd] = useState(false); // false | "out" | "in"
+  const [planOpen, setPlanOpen] = useState(false);
+  const [wantsOpen, setWantsOpen] = useState(false);
+  // Records a debt payment exactly like the Clear tab does (used by the salary plan).
+  const payDebt = (id, amt, accountId, note) => {
+    const d = localDay();
+    setOblig(x => x.map(o => {
+      if (o.id !== id) return o;
+      const outstanding = Math.max(0, (+o.outstanding || 0) - amt);
+      return { ...o, outstanding, paid: (+o.paid || 0) + amt, status: outstanding === 0 ? "closed" : o.status, closedAt: outstanding === 0 ? d : o.closedAt };
+    }));
+    setPayments(x => [...x, { id: crypto.randomUUID(), obligId: id, amount: amt, date: d, note: note || "", accountId: accountId || "" }]);
+    if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amt } : a));
+  };
+  const plan = settings.plan || {};
+  const setPlan = (p) => setSettings(s => ({ ...s, plan: p }));
+  const planResult = useMemo(() => buildSalaryPlan({ plan, oblig, accounts, expenses }), [plan, oblig, accounts, expenses]);
+  function logPlan(lines, fromAcc) {
+    lines.forEach(l => {
+      if (l.kind === "salary") logIncome({ amount: l.amount, source: "Salary", note: "", accountId: fromAcc });
+      else if (l.kind === "due" || l.kind === "ff") payDebt(l.id, l.amount, fromAcc, "Salary plan");
+      else if (l.kind === "safety" && planResult.safetyAcc) setAccounts(x => x.map(a => a.id === fromAcc ? { ...a, balance: Math.round(((+a.balance || 0) - l.amount) * 100) / 100 } : a.id === planResult.safetyAcc.id ? { ...a, balance: Math.round(((+a.balance || 0) + l.amount) * 100) / 100 } : a));
+      else if (l.kind === "trading") logExpense({ amount: l.amount, cat: "Invest", note: "to trading", accountId: fromAcc });
+    });
+    setPlan({ ...plan, lastLogged: localMonth() });
+    setPlanOpen(false);
+    const cleared = lines.filter(l => l.kind === "ff" && planResult.ff.find(x => x.id === l.id && x.clears));
+    setCelebrate(cleared.length ? `Logged. ${cleared.map(c => c.label).join(", ")} fully repaid — that's a milestone.` : "Salary plan logged.");
+  }
   const [logDate, setLogDate] = useState(null); // non-null = Money Log snapshot open for that day
+  const achievements = computeAchievements({ oblig, settings });
+  const wantsList = settings.wants || [];
+  const picks = Math.max(0, achievements.length - wantsList.filter(w => w.chosenAt || w.boughtAt).length);
+  const safetyBal = planResult.safetyAcc ? Math.max(0, +planResult.safetyAcc.balance || 0) : 0;
+  const nextWantHint = (() => {
+    if (planResult.nextUp) return `repay ${planResult.nextUp.name.trim()} (${inr(planResult.nextUp.left)} to go)`;
+    if (planResult.safetyAcc && planResult.starter && planResult.bal < planResult.starter) return `${planResult.safetyAcc.name} to ${inr(planResult.starter)} (${inr(planResult.starter - planResult.bal)} to go)`;
+    return null;
+  })();
   const snapshotInput = useMemo(() => ({ expenses, payments, incomes, oblig, sourceLabel: incomeSourceLabel, budget: settings.budget }), [expenses, payments, incomes, oblig, settings.budget]);
   const firstEntryDate = useMemo(() => [...expenses, ...incomes, ...payments].map(x => x.date).filter(Boolean).sort()[0] || localDay(), [expenses, incomes, payments]);
   // Day numbers count posts, not calendar days: the next post is your last posted day + 1, so a
@@ -413,6 +446,15 @@ export default function Clearing({ userId }) {
     return n;
   })();
 
+  // Safety-net and streak milestones are recorded the first time they happen (balances can dip later).
+  useEffect(() => {
+    if (!ready || !settings.wantsSince) return;
+    const ach = settings.achieved || {}; const add = {};
+    if (planResult.safetyAcc && planResult.starter > 0 && planResult.bal >= planResult.starter && !ach.safetyStarter) add.safetyStarter = localDay();
+    if (planResult.safetyAcc && planResult.full > 0 && planResult.bal >= planResult.full && !ach.safetyFull) add.safetyFull = localDay();
+    if (postStreak >= 30 && !ach.streak30) add.streak30 = localDay();
+    if (Object.keys(add).length) setSettings(s => ({ ...s, achieved: { ...(s.achieved || {}), ...add } }));
+  }, [ready, settings.wantsSince, planResult.bal, planResult.starter, planResult.full, postStreak]);
   const moneyInHand = accounts.reduce((s, a) => s + (+a.balance || 0), 0);
   const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
   const dueSoon = openOblig
@@ -503,34 +545,55 @@ export default function Clearing({ userId }) {
 
   const S = `
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-    .clr{font-family:'Inter',system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:${C.text};background:${C.bg};min-height:100vh;max-width:520px;margin:0 auto;padding:20px 16px 100px}
-    .num{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-    .hd{font-family:'Work Sans',system-ui,sans-serif}
-    .card{background:${C.surface};border:1px solid ${C.line};border-radius:16px;padding:18px;box-shadow:0 1px 2px rgba(4,27,60,.03),0 6px 20px rgba(4,27,60,.05)}
+    .clr{font-family:'Inter',system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:${C.text};background:${C.bg};min-height:100vh;max-width:520px;margin:0 auto;padding:22px 16px 110px;font-size:14.5px;-webkit-font-smoothing:antialiased}
+    .num{font-family:'Fraunces',Georgia,serif;font-variant-numeric:lining-nums tabular-nums;font-weight:600;letter-spacing:-.01em}
+    .hd{font-family:'Fraunces',Georgia,serif;letter-spacing:-.01em}
+    .card{background:${C.surface};border:1px solid ${C.line};border-radius:20px;padding:18px;box-shadow:0 1px 2px rgba(29,43,47,.04),0 10px 30px -12px rgba(29,43,47,.10)}
+    .card.hero{background:linear-gradient(160deg,#FFFFFF 0%,${C.surface2} 100%)}
+    .clr div{min-width:0}
+    .clr .num{white-space:nowrap}
     .row{display:flex;align-items:center}
-    .btn{border:none;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600;border-radius:8px;padding:11px 14px;color:#fff;background:${C.primary};display:inline-flex;align-items:center;gap:7px;box-shadow:0 2px 8px rgba(0,82,204,.28)}
-    .btn.ghost{background:#fff;color:${C.text};border:1px solid ${C.line};box-shadow:none}
+    .btn{border:none;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600;border-radius:12px;padding:11px 15px;color:#fff;background:${C.primary};display:inline-flex;align-items:center;gap:7px;box-shadow:0 6px 16px -6px rgba(31,77,70,.45)}
+    .btn:disabled{opacity:.45;cursor:default}
+    .btn.ghost{background:${C.surface};color:${C.text};border:1px solid ${C.line};box-shadow:none}
+    .btn.danger{color:${C.coral};border-color:${C.coral}55}
     .btn:active{transform:translateY(1px)}
-    .chip{font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:3px 8px;border-radius:999px}
-    .in{width:100%;background:#fff;border:1px solid ${C.line};color:${C.text};border-radius:8px;padding:10px 12px;font-size:15px;font-family:inherit;outline:none}
-    .in:focus{border-color:${C.primary};box-shadow:0 0 0 3px rgba(0,82,204,.14)}
-    .lbl{font-size:12px;color:${C.muted};margin-bottom:5px;display:block}
-    .tabbar{position:fixed;bottom:0;left:0;right:0;background:${C.surface};border-top:1px solid ${C.line};display:flex;max-width:520px;margin:0 auto;box-shadow:0 -4px 20px rgba(4,27,60,.05)}
-    .tabbar button{flex:1;background:none;border:none;color:${C.faint};padding:11px 0 15px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;font-family:inherit}
-    .tabbar button.on{color:${C.primary}}
-    .li{display:flex;align-items:center;justify-content:space-between;padding:13px 0;border-bottom:1px solid ${C.line}}
+    .link{background:none;border:none;padding:0;color:${C.primary};font:inherit;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;text-align:left}
+    .chip{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:3px 9px;border-radius:999px}
+    .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid ${C.line};color:${C.muted};white-space:nowrap}
+    .pill{font:inherit;font-size:13px;font-weight:500;padding:7px 13px;border-radius:999px;border:1px solid ${C.line};background:${C.surface};color:${C.text};cursor:pointer;text-align:left}
+    .seg{display:inline-flex;background:${C.surface2};border-radius:10px;padding:3px;gap:2px}
+    .seg button{font:inherit;font-size:12px;font-weight:600;border:none;background:none;color:${C.muted};padding:5px 9px;border-radius:8px;cursor:pointer}
+    .seg button.on{background:${C.surface};color:${C.text};box-shadow:0 1px 3px rgba(29,43,47,.12)}
+    .in{width:100%;background:${C.surface};border:1px solid ${C.line};color:${C.text};border-radius:12px;padding:11px 13px;font-size:15px;font-family:inherit;outline:none}
+    .in.big{font-family:'Fraunces',Georgia,serif;font-size:30px;font-weight:600;text-align:center;padding:14px}
+    .in:focus{border-color:${C.primary};box-shadow:0 0 0 3px rgba(31,77,70,.14)}
+    .lbl{font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:${C.muted};margin-bottom:6px;display:block}
+    .sub{font-size:12.5px;color:${C.muted}}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:99px;margin-right:6px;vertical-align:middle}
+    .split{display:flex;height:8px;border-radius:99px;overflow:hidden;background:${C.line};gap:2px}
+    .panel{background:${C.surface2};border-radius:14px;padding:12px 14px}
+    .legend{display:flex;justify-content:space-between;align-items:center;font:inherit;font-size:13px;color:${C.text};background:none;border:none;border-radius:8px;padding:5px 8px;cursor:pointer;width:100%}
+    .tabbar{position:fixed;bottom:0;left:0;right:0;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:1px solid ${C.line};display:flex;max-width:520px;margin:0 auto;padding-bottom:env(safe-area-inset-bottom)}
+    .tabbar button{flex:1;background:none;border:none;color:${C.faint};padding:10px 0 13px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;font-weight:500;font-family:inherit}
+    .tabbar button.on{color:${C.primary};font-weight:700}
+    .li{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid ${C.line};gap:12px}
     .li:last-child{border-bottom:none}
+    .li-btn{width:100%;background:none;border:none;border-bottom:1px solid ${C.line};font:inherit;color:inherit;cursor:pointer;text-align:left}
+    .card.li-btn{border:1px solid ${C.line}}
     .ib{background:none;border:none;color:${C.faint};cursor:pointer;padding:6px;border-radius:8px}
     .ib:hover{color:${C.text};background:${C.surface2}}
-    .bar{height:10px;border-radius:99px;background:${C.line};overflow:hidden}
+    .bar{height:8px;border-radius:99px;background:${C.line};overflow:hidden}
     .fill{height:100%;border-radius:99px}
-    .foot{font-size:11.5px;color:${C.faint};line-height:1.5}
-    .toast{position:fixed;left:16px;right:16px;bottom:84px;max-width:488px;margin:0 auto;background:${C.primary};color:#fff;border-radius:14px;padding:14px 16px;font-weight:600;display:flex;align-items:center;gap:10px;box-shadow:0 8px 30px rgba(0,82,204,.4);z-index:20}
+    .foot{font-size:12px;color:${C.faint};line-height:1.55}
+    .toast{position:fixed;left:16px;right:16px;bottom:92px;max-width:488px;margin:0 auto;background:${C.inverse};color:${C.onInverse};border-radius:16px;padding:14px 16px;font-weight:600;display:flex;align-items:center;gap:10px;box-shadow:0 14px 34px -10px rgba(29,43,47,.5);z-index:60}
     @media (prefers-reduced-motion: no-preference){
       .fill{transition:width .7s cubic-bezier(.22,1,.36,1)}
       .card,.btn{transition:box-shadow .15s ease,transform .1s ease}
       .toast{animation:pop .35s cubic-bezier(.22,1.4,.36,1)}
+      .sheet{animation:up .28s cubic-bezier(.22,1,.36,1)}
       @keyframes pop{from{transform:translateY(16px) scale(.96);opacity:0}to{transform:none;opacity:1}}
+      @keyframes up{from{transform:translateY(40px);opacity:.6}to{transform:none;opacity:1}}
     }
   `;
   if (loadError) {
@@ -550,7 +613,7 @@ export default function Clearing({ userId }) {
     <div className="clr">
       <style>{S}</style>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 18 }}>
-        <div><div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-.02em" }}>Clearing</div>
+        <div><div className="hd" style={{ fontSize: 28, fontWeight: 600 }}>Clearing</div>
           <div style={{ fontSize: 13, color: C.muted }}>What you can spend, what's due, what's left to clear.</div></div>
         <button className="ib" onClick={askNotif} style={{ color: notif === "granted" ? C.primary : C.faint }}>
           {notif === "granted" ? <BellRing size={22} /> : <Bell size={22} />}</button>
@@ -568,6 +631,12 @@ export default function Clearing({ userId }) {
           <span style={{ fontSize: 11.5, fontWeight: 500, opacity: .75 }}>{postedToday ? "Tap to re-share or make the month wrap-up" : "Not posted yet — tap to make and share it"}{postStreak > 1 ? ` · ${postStreak}-day streak` : ""}</span>
         </button>
       )}
+      {tab === "home" && (
+        <div style={{ display: "grid", gap: 14, marginBottom: 14 }}>
+          <SalaryPlanCard plan={plan} result={planResult} onOpen={() => setPlanOpen(true)} />
+          <WantsCard wants={wantsList} picks={picks} nextHint={nextWantHint} onOpen={() => setWantsOpen(true)} />
+        </div>
+      )}
       {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "home" && (
         <div className="card" style={{ marginTop: 14 }}>
@@ -582,22 +651,24 @@ export default function Clearing({ userId }) {
           </div>
         </div>
       )}
-      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, incomes, logIncome, settings, setSettings }} />}
-      {tab === "activity" && <Activity {...{ expenses, payments, incomes, oblig, accounts }} />}
-      {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }} />}
+      {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
+      {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, accounts, setAccounts, settings, setSettings, setTab }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
+      {tab === "clear" && <RepaymentsBreakdown {...{ payments, oblig }} />}
+      {planOpen && <SalaryPlanSheet {...{ plan, setPlan, accounts }} salaryLogged={incomes.some(i => (i.date || "").slice(0, 7) === localMonth() && (i.source === "Salary" || !i.source))} result={planResult} onLog={logPlan} onClose={() => setPlanOpen(false)} />}
+      {wantsOpen && <WantsSheet {...{ settings, setSettings, achievements, picks, logExpense }} nextHint={nextWantHint} available={safeToSpend - safetyBal} onClose={() => setWantsOpen(false)} />}
 
       {celebrate && (
         <div className="toast"><Heart size={18} fill="#fff" /><span>{celebrate}</span></div>
       )}
 
-      {!quickAdd && !logDate && (
-        <button onClick={() => setQuickAdd(true)} aria-label="Quick add"
-          style={{ position: "fixed", right: "max(16px, calc(50vw - 244px))", bottom: 86, width: 58, height: 58, borderRadius: 99, border: "none", background: C.primary, color: "#fff", boxShadow: "0 6px 18px rgba(4,27,60,.28)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 40 }}>
+      {!quickAdd && !logDate && !planOpen && !wantsOpen && (
+        <button onClick={() => setQuickAdd("out")} aria-label="Quick add"
+          style={{ position: "fixed", right: "max(16px, calc(50vw - 244px))", bottom: 90, width: 58, height: 58, borderRadius: 20, border: "none", background: C.primary, color: "#fff", boxShadow: "0 14px 28px -10px rgba(31,77,70,.6)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 40 }}>
           <Plus size={28} />
         </button>
       )}
-      {quickAdd && <QuickAdd {...{ accounts, expenses, settings, logExpense, logIncome }} onClose={(m) => { setQuickAdd(false); if (m) setCelebrate(m); }} />}
+      {quickAdd && <QuickAdd {...{ accounts, expenses, settings, logExpense, logIncome }} initialMode={quickAdd} onClose={(m) => { setQuickAdd(false); if (m) setCelebrate(m); }} />}
       {logDate && (
         <MoneyLogModal date={logDate} onDateChange={setLogDate} snapshotInput={snapshotInput} suggestedDay={suggestedDay(logDate)}
           posts={logPosts} customQuotes={settings.quotes || []}
@@ -607,7 +678,7 @@ export default function Clearing({ userId }) {
           onClose={() => setLogDate(null)} />
       )}
       <div className="tabbar">
-        {[["home", "Home", Wallet], ["accounts", "Accounts", Landmark], ["activity", "Activity", ArrowDownUp], ["spending", "Spending", PiggyBank], ["clear", "Clear", Users]]
+        {[["home", "Home", Wallet], ["money", "Money", ArrowDownUp], ["accounts", "Accounts", Landmark], ["clear", "Clear", Users]]
           .map(([id, label, Icon]) => (
             <button key={id} className={tab === id ? "on" : ""} onClick={() => setTab(id)}><Icon size={20} /><span>{label}</span></button>
           ))}
@@ -804,154 +875,11 @@ function ChartLegend({ items }) {
   );
 }
 
-function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, incomes, logIncome, settings, setSettings }) {
-  const [adding, setAdding] = useState(false);
-  const [moving, setMoving] = useState(false);
-  const [income, setIncome] = useState(false);
-  const [reconc, setReconc] = useState(null);
-  const seed = () => setAccounts(SEED_ACCOUNTS.map(a => ({ ...a, id: crypto.randomUUID(), balance: 0 })));
-  const addIncome = (entry) => { logIncome(entry); setIncome(false); };
-  const monthKey = localMonth();
-  const monthIn = (incomes || []).filter(i => (i.date || "").slice(0, 7) === monthKey);
-  const inBySource = Object.entries(monthIn.reduce((m, i) => { const k = incomeSourceLabel(i); m[k] = (m[k] || 0) + (+i.amount || 0); return m; }, {}))
-    .map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value)
-    .map((x, i) => ({ ...x, color: CHART_PALETTE[i % CHART_PALETTE.length] }));
-  const inTotal = inBySource.reduce((s, x) => s + x.value, 0);
-  function reconcile(id, actual) {
-    const acc = accounts.find(a => a.id === id); const diff = (+acc.balance || 0) - actual;
-    if (diff > 0) setExpenses(x => [...x, { id: crypto.randomUUID(), amount: diff, cat: "Other", date: localDay(), accountId: id, note: "cash correction" }]);
-    setAccounts(x => x.map(a => a.id === id ? { ...a, balance: actual } : a)); setReconc(null);
-  }
-  const add = (a) => { setAccounts(x => [...x, { ...a, id: crypto.randomUUID() }]); setAdding(false); };
-  const upd = (id, p) => setAccounts(x => x.map(a => a.id === id ? { ...a, ...p } : a));
-  const rm = (id) => setAccounts(x => x.filter(a => a.id !== id));
-  const move = (from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, balance: (+a.balance || 0) + amt } : a)); setMoving(false); };
-  const byPurpose = Object.keys(PURPOSE).map(p => ({ p, total: accounts.filter(a => a.purpose === p).reduce((s, a) => s + (+a.balance || 0), 0) }));
-
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      {accounts.length === 0 && (
-        <div className="card"><div style={{ fontWeight: 600, marginBottom: 6 }}>Add your first account</div>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Add each real place you hold money — your bank account, your wallet cash, whatever else. One is enough to get started; split into more only if you want per-account accuracy.</div>
-          <button className="btn" onClick={seed}>Add starter accounts</button></div>
-      )}
-      <div className="card" style={{ background: C.surface2 }}>
-        <div className="lbl">Money in hand (all accounts)</div>
-        <div className="num" style={{ fontSize: 30, fontWeight: 700 }}>{inr(moneyInHand)}</div>
-        <div className="row" style={{ gap: 8, marginTop: 12 }}>
-          {byPurpose.map(({ p, total }) => (
-            <div key={p} style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: PURPOSE[p].color, fontWeight: 700, textTransform: "uppercase" }}>{PURPOSE[p].label}</div>
-              <div className="num" style={{ fontSize: 15 }}>{inr(total)}</div>
-            </div>
-          ))}
-        </div>
-        <div className="foot" style={{ marginTop: 8 }}>These three groups are optional — just so you can see at a glance where money sits. Tagging an account below doesn't change anything except which one gets pre-picked in a few forms.</div>
-      </div>
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={() => setIncome(true)} style={{ flex: 1 }}><Plus size={16} /> Add income</button>
-        {accounts.length >= 2 && <button className="btn ghost" onClick={() => setMoving(true)} style={{ flex: 1 }}><ArrowRightLeft size={16} /> Move money</button>}
-        <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Account</button>
-      </div>
-      {income && <IncomeForm accounts={accounts} onAdd={addIncome} onCancel={() => setIncome(false)} />}
-      <div className="card">
-        <div className="lbl">Money in this month</div>
-        <div className="num" style={{ fontSize: 26, fontWeight: 700 }}>{inr(inTotal)}</div>
-        {inBySource.length > 0 ? (
-          <div className="row" style={{ gap: 14, marginTop: 10, alignItems: "center" }}>
-            <PieChart slices={inBySource} size={96} />
-            <ChartLegend items={inBySource} />
-          </div>
-        ) : <Empty>Nothing logged in yet this month. Use "Add income" for salary, reimbursements, side income and anything else that comes in.</Empty>}
-        {monthIn.some(i => !i.source) && <div className="foot" style={{ marginTop: 8 }}>"Untagged" is income logged before sources existed.</div>}
-      </div>
-      {moving && <MoveForm accounts={accounts} onMove={move} onCancel={() => setMoving(false)} />}
-      {adding && <AccountForm onSave={add} onCancel={() => setAdding(false)} />}
-      {accounts.map(a => (
-        <div className="card" key={a.id}>
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
-            <div style={{ fontWeight: 600 }}>{a.name}</div>
-            <div className="row" style={{ gap: 4 }}>
-              <button className="chip" onClick={() => setReconc(a.id)} style={{ background: "transparent", color: C.muted, border: "1px solid " + C.line, cursor: "pointer" }}>correct to actual</button>
-              <button className="ib" onClick={() => rm(a.id)}><Trash2 size={15} /></button>
-            </div>
-          </div>
-          <div className="row" style={{ gap: 8 }}>
-            <input className="in num" type="number" value={a.balance || ""} placeholder="balance" onChange={e => upd(a.id, { balance: +e.target.value })} style={{ flex: 1 }} />
-            {Object.keys(PURPOSE).map(p => (
-              <button key={p} className="btn ghost" onClick={() => upd(a.id, { purpose: p })}
-                style={{ padding: "8px 10px", fontSize: 12, borderColor: a.purpose === p ? PURPOSE[p].color : C.line, color: a.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
-            ))}
-          </div>
-          <button className="chip" onClick={() => upd(a.id, { isCash: !a.isCash })} style={{ marginTop: 8, background: "transparent", border: "1px solid " + (a.isCash ? C.teal : C.line), color: a.isCash ? C.teal : C.muted, cursor: "pointer" }}>
-            {a.isCash ? "✓ physical cash" : "mark as physical cash"}
-          </button>
-          {a.isCash && <div className="foot" style={{ marginTop: 4 }}>Never shown below ₹0 — you can't hold negative cash. If it keeps hitting zero, use "correct to actual" below to reset it to what's really in your wallet.</div>}
-          <button className="chip" onClick={() => upd(a.id, { warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}
-            style={{ marginTop: 6, background: "transparent", border: "1px solid " + (a.warChest?.on ? C.violet : C.line), color: a.warChest?.on ? C.violet : C.muted, cursor: "pointer" }}>
-            {a.warChest?.on ? "✓ war chest" : "use as war chest"}
-          </button>
-          {a.warChest?.on && (
-            <div style={{ marginTop: 8, background: C.surface2, borderRadius: 10, padding: 10, display: "grid", gap: 8 }}>
-              <div className="foot">Small, steady amounts you set aside here to put toward friends & family debt later. This only tracks the number — actually moving the money each day/week is on you, same as everything else in this app.</div>
-              <div className="row" style={{ gap: 8 }}>
-                <div style={{ flex: 1 }}><span className="lbl" style={{ marginBottom: 2 }}>Amount</span>
-                  <input className="in num" style={{ padding: "6px 8px", fontSize: 13 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, target: +e.target.value } })} /></div>
-                <div className="row" style={{ gap: 4 }}>
-                  <button className="btn ghost" onClick={() => upd(a.id, { warChest: { ...a.warChest, cadence: "daily" } })} style={{ padding: "6px 10px", fontSize: 12, borderColor: a.warChest.cadence === "daily" ? C.violet : C.line, color: a.warChest.cadence === "daily" ? C.violet : C.muted }}>per day</button>
-                  <button className="btn ghost" onClick={() => upd(a.id, { warChest: { ...a.warChest, cadence: "weekly" } })} style={{ padding: "6px 10px", fontSize: 12, borderColor: a.warChest.cadence === "weekly" ? C.violet : C.line, color: a.warChest.cadence === "weekly" ? C.violet : C.muted }}>per week</button>
-                </div>
-              </div>
-              {accounts.length > 1 && (
-                <select className="in" style={{ padding: "6px 8px", fontSize: 13 }} value={a.warChest.fromAccountId || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
-                  <option value="">Move from… (which account this comes out of)</option>
-                  {accounts.filter(x => x.id !== a.id).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
-                </select>
-              )}
-              <input className="in" style={{ padding: "6px 8px", fontSize: 13 }} placeholder="Your UPI ID for this account (optional — lets Home open a pre-filled transfer)" value={a.warChest.vpa || ""} onChange={e => upd(a.id, { warChest: { ...a.warChest, vpa: e.target.value } })} />
-            </div>
-          )}
-          {reconc === a.id && <ReconcileForm current={+a.balance || 0} onSave={(actual) => reconcile(a.id, actual)} onCancel={() => setReconc(null)} />}
-        </div>
-      ))}
-      <div className="foot" style={{ marginTop: 2 }}>Cash leaks when you forget to log it. Once in a while, count what's really in your wallet and hit "correct to actual" — the difference is booked as spending so your numbers stay honest. Record an ATM withdrawal with "Move money" (bank to cash), not as an expense.</div>
-    </div>
-  );
-}
-function IncomeForm({ accounts, onAdd, onCancel }) {
-  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id || "");
-  const [amt, setAmt] = useState("");
-  const [source, setSource] = useState("Salary");
-  const [custom, setCustom] = useState("");
-  const [note, setNote] = useState("");
-  const [date, setDate] = useState(localDay());
-  const finalSource = source === "Other" ? (custom.trim() || "Other") : source;
-  const ok = +amt > 0;
-  return (
-    <div className="card" style={{ display: "grid", gap: 10 }}>
-      <div className="row" style={{ justifyContent: "space-between" }}><div style={{ fontWeight: 600 }}>Add income</div><button className="ib" onClick={onCancel}><X size={18} /></button></div>
-      <input className="in num" type="number" inputMode="decimal" placeholder="Amount received" value={amt} onChange={e => setAmt(e.target.value)} autoFocus />
-      <SourcePicker source={source} setSource={setSource} custom={custom} setCustom={setCustom} />
-      <input className="in" placeholder="Note (optional) — e.g. Sept salary, cab reimbursement" value={note} onChange={e => setNote(e.target.value)} />
-      <div className="row" style={{ gap: 8 }}>
-        <select className="in" style={{ flex: 1 }} value={acc} onChange={e => setAcc(e.target.value)}>
-          <option value="">No account</option>
-          {accounts.map(a => <option key={a.id} value={a.id}>{a.name} — {inr(a.balance)}</option>)}
-        </select>
-        <input className="in" type="date" style={{ flex: 1 }} value={date} onChange={e => setDate(e.target.value || localDay())} />
-      </div>
-      <button className="btn" disabled={!ok} onClick={() => onAdd({ accountId: acc, amount: +amt, source: finalSource, note: note.trim(), date })} style={{ opacity: ok ? 1 : 0.5 }}>Add income</button>
-    </div>
-  );
-}
 function SourcePicker({ source, setSource, custom, setCustom }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {INCOME_SOURCES.map(x => (
-          <button key={x} className="chip" onClick={() => setSource(x)}
-            style={{ cursor: "pointer", background: source === x ? C.teal : "transparent", color: source === x ? "#fff" : C.muted, border: "1px solid " + (source === x ? C.teal : C.line) }}>{x}</button>
-        ))}
+        {INCOME_SOURCES.map(x => <Pill key={x} on={source === x} color={C.teal} onClick={() => setSource(x)}>{x}</Pill>)}
       </div>
       {source === "Other" && <input className="in" placeholder="Where's it from? (e.g. Sold old phone)" value={custom} onChange={e => setCustom(e.target.value)} />}
     </div>
@@ -959,15 +887,19 @@ function SourcePicker({ source, setSource, custom, setCustom }) {
 }
 // One-tap logging from any tab: a big amount field, recent categories first, and the account you
 // used last time already picked — so logging a spend on the go takes a few seconds.
-function QuickAdd({ accounts, expenses, settings, logExpense, logIncome, onClose }) {
-  const [mode, setMode] = useState("out");
+function QuickAdd({ accounts, expenses, settings, logExpense, logIncome, onClose, initialMode = "out" }) {
+  const [mode, setMode] = useState(initialMode === "in" ? "in" : "out");
   const [amt, setAmt] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(localDay());
   const allCats = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
   const recent = [...new Set([...(expenses || [])].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(e => e.cat).filter(Boolean))];
   const cats = [...new Set([...recent.filter(c => allCats.includes(c)).slice(0, 4), ...allCats])];
-  const [cat, setCat] = useState(cats[0] || "Other");
+  const [cat, setCatRaw] = useState(cats[0] || "Other");
+  const [catTouched, setCatTouched] = useState(false);
+  const setCat = (c) => { setCatRaw(c); setCatTouched(true); };
+  const suggested = useMemo(() => suggestCategory(note, expenses, allCats), [note]);
+  useEffect(() => { if (!catTouched && suggested) setCatRaw(suggested); }, [suggested]);
   const [source, setSource] = useState("Salary");
   const [custom, setCustom] = useState("");
   const [acc, setAcc] = useState(settings.lastAccountId && accounts.some(a => a.id === settings.lastAccountId) ? settings.lastAccountId : (accounts.find(a => a.purpose === "living")?.id || accounts[0]?.id || ""));
@@ -985,22 +917,22 @@ function QuickAdd({ accounts, expenses, settings, logExpense, logIncome, onClose
   );
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,28,40,.45)", zIndex: 55, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => onClose()}>
-      <div className="card" style={{ width: "100%", maxWidth: 520, borderRadius: "18px 18px 0 0", display: "grid", gap: 12, paddingBottom: 28 }} onClick={e => e.stopPropagation()}>
+      <div className="card sheet" style={{ width: "100%", maxWidth: 520, borderRadius: "22px 22px 0 0", display: "grid", gap: 12, paddingBottom: 28 }} onClick={e => e.stopPropagation()}>
         <div className="row" style={{ gap: 8 }}>
           {tabBtn("out", "Spent", C.coral)}{tabBtn("in", "Received", C.teal)}
           <button className="ib" onClick={() => onClose()} aria-label="Close"><X size={20} /></button>
         </div>
-        <input className="in num" type="number" inputMode="decimal" placeholder="₹ 0" value={amt} onChange={e => setAmt(e.target.value)} autoFocus
-          onKeyDown={e => { if (e.key === "Enter") save(); }} style={{ fontSize: 30, fontWeight: 700, textAlign: "center", padding: "14px" }} />
+        <input className="in big" type="number" inputMode="decimal" placeholder="₹ 0" value={amt} onChange={e => setAmt(e.target.value)} autoFocus
+          onKeyDown={e => { if (e.key === "Enter") save(); }} />
+        <input className="in" placeholder={mode === "out" ? "What was it? (e.g. auto, swiggy, blinkit)" : "Note (optional)"} value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
         {mode === "out" ? (
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {cats.map(c => (
-              <button key={c} className="chip" onClick={() => setCat(c)}
-                style={{ cursor: "pointer", padding: "7px 12px", fontSize: 13, background: cat === c ? C.primary : "transparent", color: cat === c ? "#fff" : C.muted, border: "1px solid " + (cat === c ? C.primary : C.line) }}>{c}</button>
-            ))}
+          <div>
+            {suggested && cat === suggested && !catTouched && <div className="sub" style={{ marginBottom: 6 }}>✨ Suggested from your note — tap another to change</div>}
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {cats.map(c => <Pill key={c} on={cat === c} onClick={() => setCat(c)}>{c}</Pill>)}
+            </div>
           </div>
         ) : <SourcePicker source={source} setSource={setSource} custom={custom} setCustom={setCustom} />}
-        <input className="in" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
         <div className="row" style={{ gap: 8 }}>
           {accounts.length > 0 && (
             <select className="in" style={{ flex: 1 }} value={mode === "out" ? acc : inAcc} onChange={e => (mode === "out" ? setAcc : setInAcc)(e.target.value)}>
@@ -1008,28 +940,12 @@ function QuickAdd({ accounts, expenses, settings, logExpense, logIncome, onClose
               {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           )}
-          <button className="chip" onClick={() => setDate(date === yesterday ? localDay() : yesterday)}
-            style={{ cursor: "pointer", padding: "9px 12px", background: "transparent", border: "1px solid " + C.line, color: C.muted, whiteSpace: "nowrap" }}>
+          <button className="pill" onClick={() => setDate(date === yesterday ? localDay() : yesterday)} style={{ whiteSpace: "nowrap" }}>
             {date === localDay() ? "Today" : date === yesterday ? "Yesterday" : date} ⇄
           </button>
         </div>
-        <button className="btn" disabled={!ok} onClick={save} style={{ opacity: ok ? 1 : 0.5, padding: 14, fontSize: 16 }}>{mode === "out" ? "Log spend" : "Log income"}</button>
+        <button className="btn" disabled={!ok} onClick={save} style={{ padding: 14, fontSize: 16, justifyContent: "center" }}>{mode === "out" ? "Log spend" : "Log income"}</button>
       </div>
-    </div>
-  );
-}
-function ReconcileForm({ current, onSave, onCancel }) {
-  const [actual, setActual] = useState("");
-  const diff = actual === "" ? 0 : current - +actual;
-  return (
-    <div style={{ marginTop: 10, display: "grid", gap: 8, background: C.surface2, padding: 12, borderRadius: 12 }}>
-      <div className="row" style={{ gap: 8 }}>
-        <input className="in num" type="number" placeholder={"Actual amount (app shows " + inr(current) + ")"} value={actual} onChange={e => setActual(e.target.value)} style={{ flex: 1 }} autoFocus />
-        <button className="ib" onClick={onCancel}><X size={16} /></button>
-      </div>
-      {actual !== "" && diff > 0 && <div className="foot" style={{ color: C.amber }}>{inr(diff)} less than recorded — booked as spending.</div>}
-      {actual !== "" && diff < 0 && <div className="foot" style={{ color: C.teal }}>{inr(-diff)} more than recorded — balance corrected up.</div>}
-      <button className="btn" disabled={actual === ""} onClick={() => onSave(+actual)} style={{ opacity: actual === "" ? 0.5 : 1 }}><Check size={16} /> Set to actual</button>
     </div>
   );
 }
@@ -1063,191 +979,6 @@ function MoveForm({ accounts, onMove, onCancel }) {
       </div>
       <input className="in num" type="number" placeholder="Amount" value={amt} onChange={e => setAmt(e.target.value)} />
       <button className="btn" disabled={!amt || from === to} onClick={() => onMove(from, to, +amt)} style={{ opacity: (!amt || from === to) ? 0.5 : 1 }}>Move</button>
-    </div>
-  );
-}
-
-function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }) {
-  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", note: "", date: localDay(), accountId: "" });
-  const [addingCat, setAddingCat] = useState(false);
-  const [newCat, setNewCat] = useState("");
-  const [editingCats, setEditingCats] = useState(false);
-  const [chartPeriod, setChartPeriod] = useState("month");
-  const list = [...monthExp].sort((a, b) => b.date.localeCompare(a.date));
-  const over = settings.budget > 0 && monthSpend > settings.budget;
-  const categoryOptions = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
-  const monthKey = localMonth();
-  // Loan/debt repayments live in `payments`, not `expenses` — folded in here as one more slice
-  // ("Loan repayments") so the category breakdown gives the full picture of where money went, not
-  // just discretionary spending. The monthly budget total above stays expenses-only on purpose,
-  // since "budget" is about discretionary spending, not debt payoff.
-  const monthPaid = (payments || []).filter(p => p.date.slice(0, 7) === monthKey).reduce((s, p) => s + (+p.amount || 0), 0);
-  const cats = [...new Set(monthExp.map(e => e.cat).filter(Boolean))];
-  const byCat = [
-    ...cats.map(c => ({ c, total: monthExp.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })),
-    ...(monthPaid > 0 ? [{ c: "Loan repayments", total: monthPaid, isLoan: true }] : []),
-  ].filter(x => x.total > 0).sort((a, b) => b.total - a.total);
-  const maxCat = byCat[0]?.total || 1;
-  const periodExpenses = expenses.filter(e => inPeriod(e.date, chartPeriod));
-  const periodPaid = (payments || []).filter(p => inPeriod(p.date, chartPeriod)).reduce((s, p) => s + (+p.amount || 0), 0);
-  const periodTotal = periodExpenses.reduce((s, e) => s + (+e.amount || 0), 0) + periodPaid;
-  const periodByCat = [
-    ...[...new Set(periodExpenses.map(e => e.cat).filter(Boolean))].map(c => ({ c, total: periodExpenses.filter(e => e.cat === c).reduce((s, e) => s + (+e.amount || 0), 0) })),
-    ...(periodPaid > 0 ? [{ c: "Loan repayments", total: periodPaid, isLoan: true }] : []),
-  ].filter(x => x.total > 0).sort((a, b) => b.total - a.total);
-  const colorFor = (x, i) => x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length];
-  const now = new Date();
-  const lastMonthKey = localMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1));
-  const lastMonthSpend = expenses.filter(e => e.date.slice(0, 7) === lastMonthKey).reduce((s, e) => s + (+e.amount || 0), 0);
-  const trendPct = lastMonthSpend > 0 ? Math.round(((monthSpend - lastMonthSpend) / lastMonthSpend) * 100) : null;
-  function add() {
-    if (!f.amount) return;
-    const cat = (f.cat === "Other" && f.custom.trim()) ? f.custom.trim() : f.cat;
-    setExpenses(x => [...x, { amount: +f.amount, cat, date: f.date, accountId: f.accountId, note: f.note.trim(), id: crypto.randomUUID() }]);
-    if (f.accountId) setAccounts(x => x.map(a => a.id === f.accountId ? { ...a, balance: (+a.balance || 0) - +f.amount } : a));
-    setF({ ...f, amount: "", custom: "", note: "" });
-  }
-  // One CSV per month: every expense plus every loan repayment in monthKey, so the whole month's
-  // outflow can be kept outside the app (backup, tax records, sharing with someone helping you).
-  function downloadMonth() {
-    const rows = [["Date", "Type", "Category / Debt", "Amount", "Note"]];
-    [...monthExp].sort((a, b) => a.date.localeCompare(b.date)).forEach(e => rows.push([e.date, "Expense", e.cat, e.amount, e.note || ""]));
-    (payments || []).filter(p => p.date.slice(0, 7) === monthKey).sort((a, b) => a.date.localeCompare(b.date)).forEach(p => {
-      const debtName = (oblig || []).find(o => o.id === p.obligId)?.name || "Debt";
-      rows.push([p.date, "Loan repayment", debtName, p.amount, p.note || ""]);
-    });
-    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `clearing-${monthKey}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
-  // Deletes an expense and, if it had been deducted from an account, adds that amount back —
-  // otherwise money-in-hand would stay permanently understated after removing a mistaken entry.
-  const rm = (id) => {
-    const e = expenses.find(x => x.id === id);
-    setExpenses(x => x.filter(x => x.id !== id));
-    if (e && e.accountId) setAccounts(x => x.map(a => a.id === e.accountId ? { ...a, balance: (+a.balance || 0) + (+e.amount || 0) } : a));
-  };
-  function addCategory() {
-    const name = newCat.trim();
-    if (!name || categoryOptions.includes(name)) { setAddingCat(false); setNewCat(""); return; }
-    setSettings(s => ({ ...s, categories: [...categoryOptions, name] }));
-    setF(x => ({ ...x, cat: name }));
-    setAddingCat(false); setNewCat("");
-  }
-  function removeCategory(c) {
-    const next = categoryOptions.filter(x => x !== c);
-    setSettings(s => ({ ...s, categories: next }));
-    if (f.cat === c) setF(x => ({ ...x, cat: next[0] || "Other" }));
-  }
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <div className="card" style={{ background: C.surface2 }}>
-        <div className="lbl">Spent this month</div>
-        <div className="row" style={{ gap: 10, alignItems: "baseline" }}>
-          <div className="num" style={{ fontSize: 34, fontWeight: 700, color: over ? C.coral : C.text }}>{inr(monthSpend)}</div>
-          {trendPct !== null && (
-            <span className="chip" style={{ background: trendPct > 0 ? C.coral : C.teal, color: "#fff" }}>{trendPct > 0 ? "+" : ""}{trendPct}% vs last mo.</span>
-          )}
-        </div>
-        <div className="row" style={{ gap: 8, alignItems: "flex-end", marginTop: 10 }}>
-          <div style={{ flex: 1 }}><span className="lbl">Monthly living budget</span>
-            <input className="in num" type="number" value={settings.budget || ""} placeholder="0" onChange={e => setSettings(s => ({ ...s, budget: +e.target.value }))} /></div>
-          {settings.budget > 0 && <div className="num" style={{ color: over ? C.coral : C.teal, fontSize: 14, paddingBottom: 10 }}>{over ? "−" + inr(monthSpend - settings.budget) : inr(settings.budget - monthSpend) + " left"}</div>}
-        </div>
-      </div>
-
-      <div className="card" style={{ display: "grid", gap: 10 }}>
-        <div className="row" style={{ gap: 8 }}>
-          <input className="in num" type="number" inputMode="numeric" placeholder="Amount" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} style={{ flex: 1 }} />
-          <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} style={{ width: 138 }} />
-        </div>
-        <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          {categoryOptions.map(c => (
-            <div key={c} className="row" style={{ gap: 2 }}>
-              <button className="btn ghost" onClick={() => setF({ ...f, cat: c })} style={{ padding: "6px 10px", fontSize: 12, borderColor: f.cat === c ? C.primary : C.line, color: f.cat === c ? C.primary : C.muted }}>{c}</button>
-              {editingCats && (
-                <button className="ib" onClick={() => removeCategory(c)} style={{ padding: 4 }}><Trash2 size={12} /></button>
-              )}
-            </div>
-          ))}
-          {addingCat ? (
-            <div className="row" style={{ gap: 4 }}>
-              <input className="in" autoFocus value={newCat} onChange={e => setNewCat(e.target.value)} placeholder="New category"
-                onKeyDown={e => e.key === "Enter" && addCategory()} style={{ width: 130, padding: "6px 10px", fontSize: 12 }} />
-              <button className="ib" onClick={addCategory}><Check size={14} /></button>
-              <button className="ib" onClick={() => { setAddingCat(false); setNewCat(""); }}><X size={14} /></button>
-            </div>
-          ) : (
-            <button className="btn ghost" onClick={() => setAddingCat(true)} style={{ padding: "6px 10px", fontSize: 12, borderColor: C.line, color: C.muted }}><Plus size={12} /> Add</button>
-          )}
-          <button className="btn ghost" onClick={() => setEditingCats(v => !v)} style={{ padding: "6px 10px", fontSize: 11, borderColor: C.line, color: editingCats ? C.coral : C.faint }}>{editingCats ? "Done" : "Edit"}</button>
-        </div>
-        {f.cat === "Other" && (
-          <input className="in" placeholder="Name this type (e.g. Gift, Subscription, Childcare)" value={f.custom} onChange={e => setF({ ...f, custom: e.target.value })} />
-        )}
-        <input className="in" placeholder="What exactly was this? (optional — e.g. Swiggy order, so you remember later)" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-        {accounts.length > 0 && (
-          <select className="in" value={f.accountId} onChange={e => setF({ ...f, accountId: e.target.value })}>
-            <option value="">Pay from… (optional, updates balance)</option>
-            {accounts.map(a => <option key={a.id} value={a.id}>{a.name} — {inr(a.balance)}</option>)}
-          </select>
-        )}
-        <button className="btn" onClick={add} style={{ opacity: f.amount ? 1 : 0.5 }}><Plus size={16} /> Log expense</button>
-      </div>
-
-      <div className="card">
-        <div className="lbl" style={{ marginBottom: 4 }}>Category breakdown</div>
-        <PeriodToggle period={chartPeriod} setPeriod={setChartPeriod} />
-        {periodByCat.length === 0 ? <Empty>Nothing logged in this period.</Empty> : (
-          <div className="row" style={{ gap: 16, alignItems: "center" }}>
-            <PieChart
-              centerLabel={inr(periodTotal)}
-              centerSub={PERIODS.find(p => p[0] === chartPeriod)[1]}
-              slices={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: colorFor(x, i) }))}
-            />
-            <ChartLegend items={periodByCat.map((x, i) => ({ label: x.c, value: x.total, color: colorFor(x, i) }))} />
-          </div>
-        )}
-        <div className="foot" style={{ marginTop: 8 }}>Includes loan/debt repayments alongside spending categories, so this is the full picture of where money went — not just discretionary spending.</div>
-      </div>
-
-      {byCat.length > 0 && (
-        <div className="card">
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-            <div className="lbl" style={{ margin: 0 }}>Where it went this month</div>
-            <button className="btn ghost" onClick={downloadMonth} style={{ padding: "6px 10px", fontSize: 11 }}><Download size={12} /> Download CSV</button>
-          </div>
-          {byCat.map(({ c, total, isLoan }) => {
-            const catBudget = isLoan ? 0 : (settings.catBudgets || {})[c] || 0;
-            const catOver = catBudget > 0 && total > catBudget;
-            return (
-              <div key={c} style={{ marginBottom: 10 }}>
-                <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ fontSize: 13, color: isLoan ? C.violet : C.text, fontWeight: isLoan ? 600 : 400 }}>{c}</span>
-                  <div className="row" style={{ gap: 6 }}>
-                    <span className="num" style={{ fontSize: 13, color: catOver ? C.coral : C.muted }}>{inr(total)}</span>
-                    {!isLoan && <input className="in num" style={{ width: 60, padding: "2px 6px", fontSize: 11 }} type="number" placeholder="budget" value={catBudget || ""}
-                      onChange={e => setSettings(s => ({ ...s, catBudgets: { ...(s.catBudgets || {}), [c]: +e.target.value } }))} />}
-                  </div>
-                </div>
-                <div className="bar"><div className="fill" style={{ width: (total / maxCat) * 100 + "%", background: isLoan ? C.violet : (catOver ? C.coral : C.teal) }} /></div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <div className="card">
-        {list.length === 0 ? <Empty>No spending logged this month yet.</Empty> :
-          list.map(e => (<div key={e.id} className="li">
-            <div><div style={{ fontSize: 14 }}>{e.cat}</div>
-              <div style={{ fontSize: 12, color: C.faint }}>{e.date}{e.note ? " · " + e.note : ""}</div></div>
-            <div className="row" style={{ gap: 8 }}><span className="num" style={{ fontWeight: 600 }}>{inr(e.amount)}</span>
-              <button className="ib" onClick={() => rm(e.id)}><Trash2 size={15} /></button></div></div>))}
-      </div>
     </div>
   );
 }
@@ -1389,7 +1120,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
       )}
       <div className="card" style={{ background: C.inverse, border: "none" }}>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-          <div className="lbl" style={{ margin: 0, color: "#9FB3D9" }}>Freedom Roadmap</div>
+          <div className="lbl" style={{ margin: 0, color: "#B9CEC6" }}>Freedom Roadmap</div>
           {plan.order.length > 0 && !plan.insufficient && (
             <div style={{ fontSize: 11, fontWeight: 700, color: "#8DF7C1", letterSpacing: ".03em" }}>DEBT-FREE BY {(fmtMonthYear(plan.debtFreeDate) || "").toUpperCase()}</div>
           )}
@@ -1452,7 +1183,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
             const editing = expandedId === o.id;
             return (
               <div key={o.id} style={{ padding: "11px 0", borderBottom: "1px solid " + C.line, opacity: (o.status === "closed" || o.status === "settled") ? 0.6 : 1 }}>
-                <div className="row" style={{ justifyContent: "space-between" }}>
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                   <span style={{ fontSize: 14, fontWeight: 500, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
                     {o.priority != null && <span className="chip" style={{ background: C.violet, color: "#fff" }}>your priority</span>}
@@ -1460,7 +1191,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
                     {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
                   </span>
-                  <div className="row" style={{ gap: 6 }}>
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end", flexShrink: 0, maxWidth: "58%" }}>
                     {o.status === "closed"
                       ? <span className="chip" style={{ background: C.teal, color: "#fff" }}>cleared</span>
                       : o.status === "settled"
@@ -1780,82 +1511,740 @@ function SettleForm({ accounts, outstanding, onSettle, onCancel }) {
   );
 }
 
-function Activity({ expenses, payments, incomes, oblig, accounts }) {
-  const [payPeriod, setPayPeriod] = useState("month");
-  const nameOf = (id, list) => (list.find((x) => x.id === id) || {}).name || "";
-  const items = [
-    ...(incomes || []).map((i) => ({ date: i.date, dir: "in", amount: +i.amount || 0, label: "Income · " + incomeSourceLabel(i) + (i.note ? " — " + i.note : "") + (nameOf(i.accountId, accounts) ? " → " + nameOf(i.accountId, accounts) : "") })),
-    ...(expenses || []).map((e) => ({ date: e.date, dir: "out", amount: +e.amount || 0, label: e.cat || "Spending" })),
-    ...(payments || []).map((p) => ({ date: p.date, dir: "out", amount: +p.amount || 0, label: "Paid " + (nameOf(p.obligId, oblig) || "a debt") })),
-  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+/* ================================================================================================
+   Shared helpers for the Money tab, Accounts, Salary plan and Wants
+   ================================================================================================ */
+const sum = (arr, f = (x) => x) => (arr || []).reduce((s, x) => s + (+f(x) || 0), 0);
+const fmtDay = (d) => { try { return new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }); } catch { return d; } };
+const NON_LIVING = ["invest", "account transfer"]; // money moved, not spent on living
+
+// Average everyday spend over the last (up to 3) complete months — the starting guess for the plan.
+function recentLivingAverage(expenses) {
+  const now = new Date();
+  const months = [1, 2, 3].map(k => localMonth(new Date(now.getFullYear(), now.getMonth() - k, 1)));
+  const totals = months.map(m => sum((expenses || []).filter(e => (e.date || "").slice(0, 7) === m && !NON_LIVING.includes((e.cat || "").toLowerCase())), e => e.amount)).filter(t => t > 0);
+  return totals.length ? Math.round(totals.reduce((a, b) => a + b, 0) / totals.length / 100) * 100 : 0;
+}
+
+// Picks a category from what you type in the note: first from your own past entries (same or
+// similar note), then from common Indian merchants/words. Only returns categories you actually have.
+const CAT_KEYWORDS = [
+  [/swiggy|zomato|restaurant|cafe|coffee|lunch|dinner|breakfast|starbucks|chai|biryani|pizza|domino|kfc|mcd|burger|eat ?out/, ["Dine Out", "Eating out", "Food"]],
+  [/blinkit|zepto|bigbasket|big basket|instamart|dmart|d-mart|grocer|vegetable|veggies|\bmilk\b|fruit|kirana|jiomart/, ["Groceries", "Food"]],
+  [/uber|\bola\b|rapido|\bauto\b|\bcab\b|taxi|metro|\bbus\b|train|irctc|petrol|fuel|diesel|toll|parking|fastag/, ["Transport"]],
+  [/netflix|spotify|prime video|hotstar|youtube|icloud|google one|chatgpt|claude|subscription|apple music|jiocinema|zee5|sonyliv/, ["Subscription", "Subscriptions"]],
+  [/amazon|flipkart|myntra|ajio|meesho|nykaa|shopping|clothes|shoes|dress/, ["Shopping"]],
+  [/recharge|\bjio\b|airtel|vodafone|\bvi\b|phone bill|postpaid|prepaid/, ["Phone"]],
+  [/pharmacy|medicine|doctor|hospital|clinic|apollo|medplus|pharmeasy|1mg|\blab\b|tablet/, ["Medical"]],
+  [/electricity|wifi|wi-fi|broadband|internet|\bgas\b|water bill|bescom|mseb|adani|tata power|cylinder/, ["Utilities"]],
+  [/\brent\b|landlord|maintenance|society/, ["Rent"]],
+  [/church|\bmass\b|offering|tithe/, ["Church"]],
+  [/donation|charity|donate/, ["Donation"]],
+  [/office|wework|cowork/, ["Office"]],
+];
+function suggestCategory(note, expenses, cats) {
+  const n = (note || "").toLowerCase().trim();
+  if (n.length < 2) return null;
+  const has = (c) => cats.find(x => x.toLowerCase() === c.toLowerCase());
+  const words = n.split(/[^a-z0-9]+/).filter(w => w.length > 2);
+  const score = {};
+  (expenses || []).forEach(e => {
+    const en = (e.note || "").toLowerCase().trim();
+    if (!en || !e.cat || !has(e.cat)) return;
+    if (en === n) score[e.cat] = (score[e.cat] || 0) + 5;
+    else words.forEach(w => { if (en.includes(w)) score[e.cat] = (score[e.cat] || 0) + 1; });
+  });
+  const best = Object.entries(score).sort((a, b) => b[1] - a[1])[0];
+  if (best) return has(best[0]);
+  for (const [re, options] of CAT_KEYWORDS) if (re.test(n)) for (const o of options) { const c = has(o); if (c) return c; }
+  return null;
+}
+
+function Sheet({ title, onClose, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(22,32,30,.42)", zIndex: 55, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div className="card sheet" style={{ width: "100%", maxWidth: 520, borderRadius: "22px 22px 0 0", display: "grid", gap: 12, paddingBottom: 28, maxHeight: "88vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="hd" style={{ fontWeight: 600, fontSize: 18 }}>{title}</div>
+          <button className="ib" onClick={onClose} aria-label="Close"><X size={20} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+function Seg({ options, value, onChange }) {
+  return (
+    <div className="seg">
+      {options.map(([v, l]) => <button key={v} className={value === v ? "on" : ""} onClick={() => onChange(v)}>{l}</button>)}
+    </div>
+  );
+}
+function Pill({ on, onClick, children, color = C.primary }) {
+  return (
+    <button className="pill" onClick={onClick} style={on ? { background: color, borderColor: color, color: "#fff" } : undefined}>{children}</button>
+  );
+}
+
+/* ================================================================================================
+   MONEY TAB — spending, repayments and income in one place
+   ================================================================================================ */
+function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig, accounts, setAccounts, settings, setSettings, setTab }) {
+  const [period, setPeriod] = useState("month");
+  const [filter, setFilter] = useState("all"); // all | spent | repay | in
+  const [catFilter, setCatFilter] = useState(null);
+  const [days, setDays] = useState(7);
+  const [editing, setEditing] = useState(null); // { kind: 'expense'|'income', item }
+  const [managing, setManaging] = useState(false);
+  const [budgetEdit, setBudgetEdit] = useState(false);
+  const categories = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
+  const nameOf = (id, list) => ((list || []).find(x => x.id === id) || {}).name || "";
 
   const monthKey = localMonth();
-  const inM = items.filter((i) => i.dir === "in" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
-  const outM = items.filter((i) => i.dir === "out" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
+  const now = new Date();
+  const lastMonthKey = localMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  const inMonth = (x, m) => (x.date || "").slice(0, 7) === m;
+  const monthSpend = sum(expenses.filter(e => inMonth(e, monthKey)), e => e.amount);
+  const monthRepaid = sum(payments.filter(p => inMonth(p, monthKey)), p => p.amount);
+  const monthIn = sum(incomes.filter(i => inMonth(i, monthKey)), i => i.amount);
+  const monthOut = monthSpend + monthRepaid;
+  const lastSpend = sum(expenses.filter(e => inMonth(e, lastMonthKey)), e => e.amount);
+  const trend = lastSpend > 0 ? Math.round(((monthSpend - lastSpend) / lastSpend) * 100) : null;
+  const budget = +settings.budget || 0;
 
-  const periodPayments = (payments || []).filter(p => inPeriod(p.date, payPeriod));
-  const periodPaid = periodPayments.reduce((s, p) => s + (+p.amount || 0), 0);
-  const paidByType = Object.keys(OTYPE).map(t => ({
-    t, total: periodPayments.filter(p => { const o = oblig.find(x => x.id === p.obligId); return o && o.type === t; }).reduce((s, p) => s + (+p.amount || 0), 0),
-  })).filter(x => x.total > 0);
+  // Breakdown for the chosen period: spending categories + repayments as one slice.
+  const pExp = expenses.filter(e => inPeriod(e.date, period));
+  const pPaid = sum(payments.filter(p => inPeriod(p.date, period)), p => p.amount);
+  const byCat = [
+    ...[...new Set(pExp.map(e => e.cat || "Other"))].map(c => ({ c, total: sum(pExp.filter(e => (e.cat || "Other") === c), e => e.amount) })),
+    ...(pPaid > 0 ? [{ c: "Loan repayments", total: pPaid, isLoan: true }] : []),
+  ].filter(x => x.total > 0).sort((a, b) => b.total - a.total).map((x, i) => ({ ...x, color: x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length] }));
+  const pTotal = sum(byCat, x => x.total);
 
-  // group by date
+  // Unified list
+  const items = [
+    ...expenses.map(e => ({ kind: "expense", id: e.id, date: e.date, amount: +e.amount || 0, label: e.cat || "Spending", sub: [e.note, nameOf(e.accountId, accounts)].filter(Boolean).join(" · "), item: e, cat: e.cat })),
+    ...payments.map(p => ({ kind: "repay", id: p.id, date: p.date, amount: +p.amount || 0, label: "Paid " + (nameOf(p.obligId, oblig).trim() || "a debt"), sub: [p.note, nameOf(p.accountId, accounts)].filter(Boolean).join(" · "), item: p, cat: "Loan repayments" })),
+    ...incomes.map(i => ({ kind: "income", id: i.id, date: i.date, amount: +i.amount || 0, label: incomeSourceLabel(i), sub: [i.note, nameOf(i.accountId, accounts)].filter(Boolean).join(" · "), item: i })),
+  ].filter(it => filter === "all" || (filter === "spent" && it.kind === "expense") || (filter === "repay" && it.kind === "repay") || (filter === "in" && it.kind === "income"))
+    .filter(it => !catFilter || it.cat === catFilter)
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   const groups = [];
-  items.forEach((it) => {
-    const g = groups.find((x) => x.date === it.date);
-    if (g) g.rows.push(it); else groups.push({ date: it.date, rows: [it] });
-  });
-  const fmt = (d) => { try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short" }); } catch { return d; } };
+  items.forEach(it => { const g = groups.find(x => x.date === it.date); if (g) g.rows.push(it); else groups.push({ date: it.date, rows: [it] }); });
+  const shown = groups.slice(0, days);
+
+  function downloadMonth() {
+    const rows = [["Date", "Type", "Category / Debt / Source", "Amount", "Note"]];
+    expenses.filter(e => inMonth(e, monthKey)).forEach(e => rows.push([e.date, "Spent", e.cat, e.amount, e.note || ""]));
+    payments.filter(p => inMonth(p, monthKey)).forEach(p => rows.push([p.date, "Repayment", nameOf(p.obligId, oblig), p.amount, p.note || ""]));
+    incomes.filter(i => inMonth(i, monthKey)).forEach(i => rows.push([i.date, "In", incomeSourceLabel(i), i.amount, i.note || ""]));
+    rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = `clearing-${monthKey}.csv`; a.click();
+  }
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      <div className="card" style={{ background: C.surface2 }}>
-        <div className="lbl">This month, in and out</div>
-        <div className="row" style={{ gap: 10, marginTop: 4 }}>
-          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, fontWeight: 700, color: C.teal }}>+ {inr(inM)}</div><div style={{ fontSize: 12, color: C.muted }}>came in</div></div>
-          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, fontWeight: 700, color: C.text }}>− {inr(outM)}</div><div style={{ fontSize: 12, color: C.muted }}>went out</div></div>
+      <div className="card hero">
+        <div className="lbl">This month</div>
+        <div className="row" style={{ gap: 10, marginTop: 2, alignItems: "flex-start" }}>
+          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap", color: C.teal }}>+{inr(monthIn)}</div><div className="sub">came in</div></div>
+          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap" }}>−{inr(monthOut)}</div><div className="sub">went out</div></div>
+          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap", color: monthIn - monthOut >= 0 ? C.teal : C.coral }}>{monthIn - monthOut >= 0 ? "" : "−"}{inr(Math.abs(monthIn - monthOut))}</div><div className="sub">left</div></div>
         </div>
+        <div className="split" style={{ marginTop: 14 }}>
+          <div style={{ width: (monthOut ? (monthSpend / monthOut) * 100 : 50) + "%", background: C.amber }} />
+          <div style={{ width: (monthOut ? (monthRepaid / monthOut) * 100 : 50) + "%", background: C.violet }} />
+        </div>
+        <div className="row" style={{ justifyContent: "space-between", marginTop: 8, fontSize: 12.5 }}>
+          <span><span className="dot" style={{ background: C.amber }} />Everyday {inr(monthSpend)}{trend !== null && <span style={{ color: trend > 0 ? C.coral : C.teal }}> · {trend > 0 ? "+" : ""}{trend}% vs last month</span>}</span>
+          <span><span className="dot" style={{ background: C.violet }} />Repayments {inr(monthRepaid)}</span>
+        </div>
+        {budget > 0 && !budgetEdit ? (
+          <div style={{ marginTop: 14 }}>
+            <div className="bar"><div className="fill" style={{ width: Math.min(100, (monthSpend / budget) * 100) + "%", background: monthSpend > budget ? C.coral : C.teal }} /></div>
+            <div className="row" style={{ justifyContent: "space-between", marginTop: 6, fontSize: 12.5, color: C.muted }}>
+              <span>{monthSpend > budget ? `${inr(monthSpend - budget)} over` : `${inr(budget - monthSpend)} left`} of {inr(budget)} everyday budget</span>
+              <button className="link" onClick={() => setBudgetEdit(true)}>Change</button>
+            </div>
+          </div>
+        ) : budgetEdit ? (
+          <div className="row" style={{ gap: 8, marginTop: 14 }}>
+            <input className="in num" type="number" inputMode="numeric" autoFocus placeholder="Monthly everyday budget" defaultValue={budget || ""} id="budgetIn" />
+            <button className="btn" onClick={() => { const v = +document.getElementById("budgetIn").value || 0; setSettings(s => ({ ...s, budget: v })); setBudgetEdit(false); }}>Save</button>
+          </div>
+        ) : (
+          <button className="link" style={{ marginTop: 12 }} onClick={() => setBudgetEdit(true)}>Set an everyday budget</button>
+        )}
       </div>
 
       <div className="card">
-        <div className="lbl" style={{ marginBottom: 4 }}>Payments breakdown</div>
-        <PeriodToggle period={payPeriod} setPeriod={setPayPeriod} />
-        {paidByType.length === 0 ? <Empty>No payments logged in this period.</Empty> : (
-          <div className="row" style={{ gap: 16, alignItems: "center" }}>
-            <PieChart
-              centerLabel={inr(periodPaid)}
-              centerSub={PERIODS.find(p => p[0] === payPeriod)[1]}
-              slices={paidByType.map(x => ({ label: OTYPE[x.t].short, value: x.total, color: OTYPE[x.t].color }))}
-            />
-            <ChartLegend items={paidByType.map(x => ({ label: OTYPE[x.t].label, value: x.total, color: OTYPE[x.t].color }))} />
+        <div className="row" style={{ justifyContent: "space-between", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
+          <div className="hd" style={{ fontWeight: 600, fontSize: 16, whiteSpace: "nowrap" }}>Where it went</div>
+          <Seg options={PERIODS} value={period} onChange={setPeriod} />
+        </div>
+        {byCat.length === 0 ? <Empty>Nothing out in this period yet.</Empty> : (
+          <div className="row" style={{ gap: 16, alignItems: "flex-start" }}>
+            <PieChart slices={byCat.map(x => ({ value: x.total, color: x.color }))} size={112} centerLabel={inr(pTotal)} centerSub={PERIODS.find(p => p[0] === period)[1]} />
+            <div style={{ flex: 1, display: "grid", gap: 2 }}>
+              {byCat.slice(0, 8).map(x => (
+                <button key={x.c} className="legend" onClick={() => { setCatFilter(catFilter === x.c ? null : x.c); if (x.isLoan) setFilter("all"); }} style={catFilter === x.c ? { background: C.surface2 } : undefined}>
+                  <span className="row" style={{ gap: 7 }}><span className="dot" style={{ background: x.color, margin: 0 }} />{x.c}</span>
+                  <span className="num" style={{ fontSize: 13 }}>{Math.round((x.total / pTotal) * 100)}%</span>
+                </button>
+              ))}
+              {byCat.length > 8 && <div className="sub" style={{ paddingLeft: 8 }}>+ {byCat.length - 8} more</div>}
+            </div>
           </div>
         )}
       </div>
 
-      {groups.length === 0 ? (
-        <div className="card"><Empty>Nothing recorded yet. Add income on Accounts, log spending on Spending, or record a payment on Clear, and it all shows up here.</Empty></div>
-      ) : groups.map((g) => (
-        <div className="card" key={g.date}>
-          <div className="lbl" style={{ marginBottom: 4 }}>{fmt(g.date)}</div>
-          {g.rows.map((r, i) => (
-            <div className="li" key={i}>
-              <div className="row" style={{ gap: 10 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 99, background: r.dir === "in" ? C.teal : C.coral, display: "inline-block" }} />
-                <span style={{ fontSize: 14 }}>{r.label}</span>
-              </div>
-              <span className="num" style={{ fontWeight: 600, color: r.dir === "in" ? C.teal : C.text }}>{r.dir === "in" ? "+ " : "− "}{inr(r.amount)}</span>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {[["all", "All"], ["spent", "Spent"], ["repay", "Repayments"], ["in", "In"]].map(([v, l]) => <Pill key={v} on={filter === v} onClick={() => { setFilter(v); setCatFilter(null); }}>{l}</Pill>)}
+        {catFilter && <Pill on onClick={() => setCatFilter(null)} color={C.text}>{catFilter} ✕</Pill>}
+      </div>
+
+      {shown.length === 0 ? <div className="card"><Empty>Nothing here yet. Tap + to log something.</Empty></div> : shown.map(g => {
+        const out = sum(g.rows.filter(r => r.kind !== "income"), r => r.amount);
+        const inn = sum(g.rows.filter(r => r.kind === "income"), r => r.amount);
+        return (
+          <div className="card" key={g.date} style={{ padding: "12px 16px" }}>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 2 }}>
+              <span className="lbl" style={{ margin: 0 }}>{g.date === localDay() ? "Today" : fmtDay(g.date)}</span>
+              <span className="sub">{inn > 0 && <span style={{ color: C.teal }}>+{inr(inn)} </span>}{out > 0 && <>−{inr(out)}</>}</span>
             </div>
-          ))}
-        </div>
-      ))}
-      <div className="foot">Green is money in, red-dot is money out. Loan and family repayments show here as "Paid …". Transfers between your own accounts aren't shown, since that money hasn't left you.</div>
+            {g.rows.map(r => (
+              <button key={r.kind + r.id} className="li li-btn" onClick={() => r.kind === "repay" ? setTab("clear") : setEditing({ kind: r.kind, item: r.item })}>
+                <div style={{ textAlign: "left", minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 500 }}>{r.label}</div>
+                  {r.sub && <div className="sub" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.sub}</div>}
+                </div>
+                <span className="num" style={{ fontSize: 15, color: r.kind === "income" ? C.teal : r.kind === "repay" ? C.violet : C.text }}>{r.kind === "income" ? "+" : "−"}{inr(r.amount)}</span>
+              </button>
+            ))}
+          </div>
+        );
+      })}
+      {groups.length > days && <button className="btn ghost" onClick={() => setDays(d => d + 14)} style={{ justifyContent: "center" }}>Show more</button>}
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <button className="link" onClick={() => setManaging(true)}>Manage categories</button>
+        <button className="link" onClick={downloadMonth}><Download size={13} /> This month as CSV</button>
+      </div>
+      <div className="foot">Tap any entry to fix it. Repayments open on the Clear tab, where undoing one also restores the debt.</div>
+
+      {editing && <EntrySheet {...{ editing, accounts, setAccounts, setExpenses, setIncomes, categories }} onClose={() => setEditing(null)} />}
+      {managing && <CategoryManager {...{ categories, expenses, setExpenses, setSettings }} onClose={() => setManaging(false)} />}
     </div>
+  );
+}
+
+// Edit or delete a spend / income. Changing the amount or account also corrects the account balances.
+function EntrySheet({ editing, accounts, setAccounts, setExpenses, setIncomes, categories, onClose }) {
+  const isExp = editing.kind === "expense";
+  const orig = editing.item;
+  const [f, setF] = useState({ amount: String(orig.amount || ""), cat: orig.cat || categories[0], source: orig.source || "Other", note: orig.note || "", date: orig.date, accountId: orig.accountId || "" });
+  const sign = isExp ? -1 : 1;
+  const applyBalance = (accId, amt) => { if (accId) setAccounts(x => x.map(a => a.id === accId ? { ...a, balance: (+a.balance || 0) + amt } : a)); };
+  function save() {
+    const amount = +f.amount || 0; if (!amount) return;
+    applyBalance(orig.accountId, -sign * (+orig.amount || 0)); // undo old
+    applyBalance(f.accountId, sign * amount);                // apply new
+    const next = isExp ? { ...orig, amount, cat: f.cat, note: f.note.trim(), date: f.date, accountId: f.accountId } : { ...orig, amount, source: f.source, note: f.note.trim(), date: f.date, accountId: f.accountId };
+    (isExp ? setExpenses : setIncomes)(x => x.map(e => e.id === orig.id ? next : e));
+    onClose();
+  }
+  function del() {
+    if (!confirm(`Delete this ${isExp ? "spend" : "income"} of ${inr(orig.amount)}?`)) return;
+    applyBalance(orig.accountId, -sign * (+orig.amount || 0));
+    (isExp ? setExpenses : setIncomes)(x => x.filter(e => e.id !== orig.id));
+    onClose();
+  }
+  return (
+    <Sheet title={isExp ? "Edit spend" : "Edit income"} onClose={onClose}>
+      <input className="in num big" type="number" inputMode="decimal" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} />
+      {isExp ? (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {[...new Set([...categories, f.cat])].map(c => <Pill key={c} on={f.cat === c} onClick={() => setF({ ...f, cat: c })}>{c}</Pill>)}
+        </div>
+      ) : (
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {[...new Set([...INCOME_SOURCES.filter(s => s !== "Other"), f.source])].map(s => <Pill key={s} on={f.source === s} color={C.teal} onClick={() => setF({ ...f, source: s })}>{s}</Pill>)}
+        </div>
+      )}
+      <input className="in" placeholder="Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
+      <div className="row" style={{ gap: 8 }}>
+        <select className="in" style={{ flex: 1 }} value={f.accountId} onChange={e => setF({ ...f, accountId: e.target.value })}>
+          <option value="">No account</option>
+          {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <input className="in" type="date" style={{ flex: 1 }} value={f.date} onChange={e => setF({ ...f, date: e.target.value || f.date })} />
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost danger" onClick={del}><Trash2 size={15} /> Delete</button>
+        <button className="btn" onClick={save} style={{ flex: 1, justifyContent: "center" }}>Save</button>
+      </div>
+    </Sheet>
+  );
+}
+
+// Rename, merge or add categories. Renaming/merging moves every past entry with it.
+function CategoryManager({ categories, expenses, setExpenses, setSettings, onClose }) {
+  const [sel, setSel] = useState(null);
+  const [name, setName] = useState("");
+  const [mergeTo, setMergeTo] = useState("");
+  const [adding, setAdding] = useState("");
+  const counts = {}; expenses.forEach(e => { counts[e.cat] = (counts[e.cat] || 0) + 1; });
+  const all = [...new Set([...categories, ...Object.keys(counts).filter(Boolean)])];
+  const saveCats = (list) => setSettings(s => ({ ...s, categories: list }));
+  function rename() {
+    const to = name.trim(); if (!to || to === sel) return;
+    setExpenses(x => x.map(e => e.cat === sel ? { ...e, cat: to } : e));
+    saveCats([...new Set(all.map(c => c === sel ? to : c))]);
+    setSel(null);
+  }
+  function merge() {
+    if (!mergeTo || mergeTo === sel) return;
+    if (!confirm(`Move all ${counts[sel] || 0} "${sel}" entries into "${mergeTo}" and remove "${sel}"?`)) return;
+    setExpenses(x => x.map(e => e.cat === sel ? { ...e, cat: mergeTo } : e));
+    saveCats(all.filter(c => c !== sel));
+    setSel(null);
+  }
+  function remove() { saveCats(all.filter(c => c !== sel)); setSel(null); }
+  return (
+    <Sheet title="Categories" onClose={onClose}>
+      {!sel ? (
+        <>
+          <div style={{ display: "grid" }}>
+            {all.map(c => (
+              <button key={c} className="li li-btn" onClick={() => { setSel(c); setName(c); setMergeTo(""); }}>
+                <span style={{ fontSize: 14.5 }}>{c}</span><span className="sub">{counts[c] || 0} entries ›</span>
+              </button>
+            ))}
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <input className="in" placeholder="New category" value={adding} onChange={e => setAdding(e.target.value)} />
+            <button className="btn" disabled={!adding.trim()} onClick={() => { saveCats([...new Set([...all, adding.trim()])]); setAdding(""); }}>Add</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="sub">{counts[sel] || 0} entries in "{sel}"</div>
+          <span className="lbl">Rename</span>
+          <div className="row" style={{ gap: 8 }}>
+            <input className="in" value={name} onChange={e => setName(e.target.value)} />
+            <button className="btn" onClick={rename}>Rename</button>
+          </div>
+          <span className="lbl">Merge into another category</span>
+          <div className="row" style={{ gap: 8 }}>
+            <select className="in" value={mergeTo} onChange={e => setMergeTo(e.target.value)}>
+              <option value="">Choose…</option>
+              {all.filter(c => c !== sel).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <button className="btn" disabled={!mergeTo} onClick={merge}>Merge</button>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost" onClick={() => setSel(null)}>Back</button>
+            {!counts[sel] && <button className="btn ghost danger" onClick={remove}><Trash2 size={15} /> Remove</button>}
+          </div>
+        </>
+      )}
+    </Sheet>
+  );
+}
+
+// Repayments by debt type — moved here from the old Activity tab.
+function RepaymentsBreakdown({ payments, oblig }) {
+  const [period, setPeriod] = useState("month");
+  const pp = payments.filter(p => inPeriod(p.date, period));
+  const total = sum(pp, p => p.amount);
+  const byType = Object.keys(OTYPE).map(t => ({ t, total: sum(pp.filter(p => (oblig.find(o => o.id === p.obligId) || {}).type === t), p => p.amount) })).filter(x => x.total > 0);
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+        <div className="hd" style={{ fontWeight: 600, fontSize: 16 }}>Repaid</div>
+        <Seg options={PERIODS} value={period} onChange={setPeriod} />
+      </div>
+      {byType.length === 0 ? <Empty>No repayments in this period.</Empty> : (
+        <div className="row" style={{ gap: 16 }}>
+          <PieChart centerLabel={inr(total)} centerSub={PERIODS.find(p => p[0] === period)[1]} slices={byType.map(x => ({ value: x.total, color: OTYPE[x.t].color }))} size={104} />
+          <ChartLegend items={byType.map(x => ({ label: OTYPE[x.t].label, value: x.total, color: OTYPE[x.t].color }))} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================================================
+   ACCOUNTS
+   ================================================================================================ */
+function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, openQuickAdd, moneyInHand }) {
+  const [open, setOpen] = useState(null);      // account id for the detail sheet
+  const [mode, setMode] = useState(null);      // 'move' | 'pickUpdate' | 'add'
+  const monthIn = sum(incomes.filter(i => (i.date || "").slice(0, 7) === localMonth()), i => i.amount);
+  const byPurpose = Object.keys(PURPOSE).map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
+  const positive = byPurpose.reduce((s, x) => s + Math.max(0, x.total), 0);
+  const acc = accounts.find(a => a.id === open);
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="card hero">
+        <div className="lbl">Money in hand</div>
+        <div className="num" style={{ fontSize: 36, color: moneyInHand < 0 ? C.coral : C.text }}>{moneyInHand < 0 ? "−" : ""}{inr(Math.abs(moneyInHand))}</div>
+        {positive > 0 && (
+          <div className="split" style={{ marginTop: 12 }}>
+            {byPurpose.filter(x => x.total > 0).map(x => <div key={x.p} style={{ width: (x.total / positive) * 100 + "%", background: PURPOSE[x.p].color }} />)}
+          </div>
+        )}
+        <div className="row" style={{ gap: 12, marginTop: 8, flexWrap: "wrap", fontSize: 12.5 }}>
+          {byPurpose.map(x => <span key={x.p}><span className="dot" style={{ background: PURPOSE[x.p].color }} />{PURPOSE[x.p].short} {inr(x.total)}</span>)}
+        </div>
+        <div className="sub" style={{ marginTop: 10 }}>{inr(monthIn)} came in this month</div>
+      </div>
+
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => openQuickAdd("in")}><Plus size={16} /> Add income</button>
+        {accounts.length >= 2 && <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setMode("move")}><ArrowRightLeft size={16} /> Move</button>}
+        <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setMode("pickUpdate")}>Update balance</button>
+      </div>
+
+      <div className="card" style={{ padding: "6px 16px" }}>
+        {accounts.length === 0 && <Empty>No accounts yet — add the places you hold money.</Empty>}
+        {accounts.map(a => (
+          <button key={a.id} className="li li-btn" onClick={() => setOpen(a.id)}>
+            <div style={{ textAlign: "left" }}>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>{a.name}</div>
+              <div className="row" style={{ gap: 6, marginTop: 3 }}>
+                {a.purpose && <span className="tag" style={{ color: PURPOSE[a.purpose].color, borderColor: PURPOSE[a.purpose].color }}>{PURPOSE[a.purpose].short}</span>}
+                {a.isCash && <span className="tag">💵 Cash</span>}
+                {a.warChest?.on && <span className="tag">War chest</span>}
+              </div>
+            </div>
+            <span className="num" style={{ fontSize: 19, color: (+a.balance || 0) < 0 ? C.coral : C.text }}>{(+a.balance || 0) < 0 ? "−" : ""}{inr(Math.abs(+a.balance || 0))}</span>
+          </button>
+        ))}
+        <button className="li li-btn" onClick={() => setMode("add")} style={{ color: C.primary, fontWeight: 600 }}><span className="row" style={{ gap: 6 }}><Plus size={16} /> Add account</span><span /></button>
+      </div>
+
+      {mode === "move" && (
+        <Sheet title="Move money" onClose={() => setMode(null)}>
+          <MoveForm accounts={accounts} onMove={(from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, balance: (+a.balance || 0) + amt } : a)); setMode(null); }} onCancel={() => setMode(null)} />
+          <div className="foot">For ATM withdrawals too (bank → cash). Moving money isn't spending, so it doesn't show up in Money.</div>
+        </Sheet>
+      )}
+      {mode === "pickUpdate" && (
+        <Sheet title="Update which account?" onClose={() => setMode(null)}>
+          {accounts.map(a => <button key={a.id} className="li li-btn" onClick={() => { setMode(null); setOpen(a.id + ":update"); }}><span>{a.name}</span><span className="num">{inr(a.balance)}</span></button>)}
+        </Sheet>
+      )}
+      {mode === "add" && (
+        <Sheet title="New account" onClose={() => setMode(null)}>
+          <AccountForm onSave={(a) => { setAccounts(x => [...x, { ...a, id: crypto.randomUUID() }]); setMode(null); }} onCancel={() => setMode(null)} />
+        </Sheet>
+      )}
+      {open && (acc || accounts.find(a => a.id === open.split(":")[0])) && (
+        <AccountSheet account={acc || accounts.find(a => a.id === open.split(":")[0])} startOnUpdate={open.endsWith(":update")}
+          {...{ accounts, setAccounts, logExpense, logIncome }} onClose={() => setOpen(null)} />
+      )}
+    </div>
+  );
+}
+
+function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExpense, logIncome, onClose }) {
+  const [actual, setActual] = useState(startOnUpdate ? "" : null);
+  const [how, setHow] = useState("set");
+  const [name, setName] = useState(a.name);
+  const upd = (p) => setAccounts(x => x.map(y => y.id === a.id ? { ...y, ...p } : y));
+  const cur = +a.balance || 0;
+  const diff = actual === null || actual === "" ? 0 : (+actual - cur);
+  function applyUpdate() {
+    if (actual === "" || actual === null) return;
+    const target = +actual;
+    if (how === "spend" && diff < 0) logExpense({ amount: -diff, cat: "Other", note: "balance correction", accountId: "" });
+    if (how === "income" && diff > 0) logIncome({ amount: diff, source: "Other", note: "balance correction", accountId: "" });
+    upd({ balance: target });
+    setActual(null); setHow("set");
+  }
+  return (
+    <Sheet title={a.name} onClose={onClose}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        <span className="sub">Balance in the app</span>
+        <span className="num" style={{ fontSize: 26, color: cur < 0 ? C.coral : C.text }}>{cur < 0 ? "−" : ""}{inr(Math.abs(cur))}</span>
+      </div>
+
+      {actual === null ? (
+        <button className="btn" style={{ justifyContent: "center" }} onClick={() => setActual("")}>Update balance</button>
+      ) : (
+        <div className="panel">
+          <span className="lbl">What does {a.name} actually have right now?</span>
+          <input className="in num big" type="number" inputMode="decimal" autoFocus value={actual} onChange={e => setActual(e.target.value)} placeholder="₹ 0" />
+          {actual !== "" && diff !== 0 && (
+            <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+              <div className="sub">That's {diff > 0 ? "₹" + Math.abs(diff).toLocaleString("en-IN") + " more" : "₹" + Math.abs(diff).toLocaleString("en-IN") + " less"} than the app shows.</div>
+              <Pill on={how === "set"} onClick={() => setHow("set")}>Just correct the balance</Pill>
+              {diff < 0 && <Pill on={how === "spend"} onClick={() => setHow("spend")}>Log the difference as spending I forgot</Pill>}
+              {diff > 0 && <Pill on={how === "income"} onClick={() => setHow("income")} color={C.teal}>Log the difference as income</Pill>}
+            </div>
+          )}
+          <div className="row" style={{ gap: 8, marginTop: 10 }}>
+            <button className="btn ghost" onClick={() => setActual(null)}>Cancel</button>
+            <button className="btn" style={{ flex: 1, justifyContent: "center" }} disabled={actual === ""} onClick={applyUpdate}>Save balance</button>
+          </div>
+        </div>
+      )}
+
+      <span className="lbl" style={{ marginTop: 6 }}>Name</span>
+      <input className="in" value={name} onChange={e => setName(e.target.value)} onBlur={() => name.trim() && name !== a.name && upd({ name: name.trim() })} />
+      <span className="lbl">What this account is for</span>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {Object.keys(PURPOSE).map(p => <Pill key={p} on={a.purpose === p} color={PURPOSE[p].color} onClick={() => upd({ purpose: p })}>{PURPOSE[p].label}</Pill>)}
+      </div>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <Pill on={!!a.isCash} color={C.teal} onClick={() => upd({ isCash: !a.isCash })}>💵 Physical cash</Pill>
+        <Pill on={!!a.warChest?.on} color={C.violet} onClick={() => upd({ warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}>War chest</Pill>
+      </div>
+      {a.warChest?.on && (
+        <div className="panel" style={{ display: "grid", gap: 8 }}>
+          <div className="sub">Small, steady amounts set aside here for friends & family repayments.</div>
+          <div className="row" style={{ gap: 8 }}>
+            <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
+            <Seg options={[["daily", "per day"], ["weekly", "per week"]]} value={a.warChest.cadence} onChange={(v) => upd({ warChest: { ...a.warChest, cadence: v } })} />
+          </div>
+          {accounts.length > 1 && (
+            <select className="in" value={a.warChest.fromAccountId || ""} onChange={e => upd({ warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
+              <option value="">Comes out of…</option>
+              {accounts.filter(x => x.id !== a.id).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          )}
+          <input className="in" placeholder="Your UPI ID for this account (optional)" value={a.warChest.vpa || ""} onChange={e => upd({ warChest: { ...a.warChest, vpa: e.target.value } })} />
+        </div>
+      )}
+      <button className="btn ghost danger" style={{ justifyContent: "center", marginTop: 6 }} onClick={() => { if (confirm(`Delete ${a.name}? Past entries stay, they just won't be linked to an account.`)) { setAccounts(x => x.filter(y => y.id !== a.id)); onClose(); } }}><Trash2 size={15} /> Delete account</button>
+    </Sheet>
+  );
+}
+
+/* ================================================================================================
+   SALARY PLAN — splits a salary across dues, living, safety net, F&F snowball and trading
+   ================================================================================================ */
+function buildSalaryPlan({ plan, oblig, accounts, expenses }) {
+  const salary = +plan.salary || 0;
+  const open = oblig.filter(o => o.status !== "closed" && o.status !== "settled" && (+o.outstanding || 0) > 0);
+  const dues = open.filter(o => +o.monthly > 0).map(o => ({ id: o.id, name: o.name.trim(), amount: Math.min(+o.monthly, +o.outstanding), type: o.type }));
+  const duesTotal = sum(dues, d => d.amount);
+  const livingSuggested = recentLivingAverage(expenses);
+  const living = plan.living !== undefined && plan.living !== "" ? +plan.living : livingSuggested;
+  const leftover = salary - duesTotal - living;
+  const safetyAcc = accounts.find(a => a.id === plan.safetyAccountId);
+  const bal = safetyAcc ? +safetyAcc.balance || 0 : 0;
+  const starter = +plan.starterTarget || 0;
+  const full = Math.max(+plan.fullTarget || 0, starter);
+  let safety = 0, phase = "none";
+  if (safetyAcc && leftover > 0 && full > 0) {
+    if (bal < starter) { phase = "starter"; safety = Math.round(leftover * (+(plan.starterPct ?? 60)) / 100); }
+    else if (bal < full) { phase = "building"; safety = Math.round(leftover * (+(plan.afterPct ?? 20)) / 100); }
+    else phase = "full";
+    safety = Math.max(0, Math.min(safety, full - bal));
+  }
+  const afterSafety = Math.max(0, leftover - safety);
+  const tradingOk = !starter || bal >= starter;
+  const trading = tradingOk ? Math.round(afterSafety * (+plan.tradingPct || 0) / 100) : 0;
+  let pool = Math.max(0, afterSafety - trading);
+  const duesById = Object.fromEntries(dues.map(d => [d.id, d.amount]));
+  const fam = open.filter(o => o.type === "family").map(o => ({ ...o, left: (+o.outstanding || 0) - (duesById[o.id] || 0) })).filter(o => o.left > 0)
+    .sort((a, b) => {
+      const pa = a.priority ?? null, pb = b.priority ?? null;
+      if (pa !== null || pb !== null) return (pa ?? Infinity) - (pb ?? Infinity);
+      return a.left - b.left;
+    });
+  const ff = [];
+  for (const o of fam) { if (pool <= 0) break; const amt = Math.min(pool, o.left); ff.push({ id: o.id, name: o.name.trim(), amount: Math.round(amt), clears: amt >= o.left, left: o.left }); pool -= amt; }
+  const ffTotal = sum(ff, x => x.amount);
+  const nextUp = fam.find(o => !ff.some(x => x.id === o.id && x.clears));
+  return { salary, dues, duesTotal, living, livingSuggested, leftover, safetyAcc, bal, starter, full, safety, phase, trading, tradingOk, ff, ffTotal, nextUp, famOpen: fam.length };
+}
+
+function SalaryPlanCard({ plan, result, onOpen }) {
+  if (!plan || !plan.salary) {
+    return (
+      <button className="card li-btn" onClick={onOpen} style={{ display: "block", textAlign: "left", width: "100%" }}>
+        <div className="hd" style={{ fontWeight: 600, fontSize: 16 }}>Plan your salary</div>
+        <div className="sub" style={{ marginTop: 4 }}>Split each payday across dues, living, your safety net and friends & family — snowball style.</div>
+      </button>
+    );
+  }
+  const logged = plan.lastLogged === localMonth();
+  return (
+    <button className="card li-btn" onClick={onOpen} style={{ display: "block", textAlign: "left", width: "100%" }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="hd" style={{ fontWeight: 600, fontSize: 16 }}>Salary plan</div>
+        <span className="tag" style={logged ? { color: C.teal, borderColor: C.teal } : undefined}>{logged ? "Logged this month ✓" : "Tap to see this month"}</span>
+      </div>
+      {result.leftover < 0 ? (
+        <div style={{ color: C.coral, fontSize: 13.5, marginTop: 6 }}>Dues + living are {inr(-result.leftover)} more than your salary.</div>
+      ) : (
+        <div className="row" style={{ gap: 10, marginTop: 10 }}>
+          <Stat n={inr(result.safety)} l={"Safety net" + (result.safetyAcc ? " → " + result.safetyAcc.name : "")} />
+          <Stat n={inr(result.ffTotal)} l="Friends & family" />
+          {result.trading > 0 && <Stat n={inr(result.trading)} l="Trading" />}
+        </div>
+      )}
+      {result.ff[0] && <div className="sub" style={{ marginTop: 8 }}>{result.ff[0].clears ? `${result.ff[0].name} fully repaid this month 🎉` : `Next up: ${result.ff[0].name} — ${inr(result.ff[0].left - result.ff[0].amount)} left after this month`}</div>}
+    </button>
+  );
+}
+
+function SalaryPlanSheet({ plan, setPlan, result, accounts, salaryLogged, onLog, onClose }) {
+  const [edit, setEdit] = useState(!plan.salary);
+  const [checked, setChecked] = useState({});
+  const incomeAcc = accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id || "";
+  const fromAcc = plan.fromAccountId || incomeAcc;
+  const lines = [
+    ...(!salaryLogged ? [{ key: "salary", kind: "salary", label: "Salary received", sub: "Not logged as income this month yet", amount: result.salary, def: true, isIn: true }] : []),
+    ...result.dues.map(d => ({ key: "due:" + d.id, kind: "due", id: d.id, label: d.name, sub: "Monthly due", amount: d.amount, def: false })),
+    ...(result.safety > 0 ? [{ key: "safety", kind: "safety", label: "Safety net → " + result.safetyAcc.name, sub: `${result.phase === "starter" ? "Starter" : "Full"} goal ${inr(result.phase === "starter" ? result.starter : result.full)} · has ${result.bal < 0 ? "−" : ""}${inr(Math.abs(result.bal))}`, amount: result.safety, def: true }] : []),
+    ...result.ff.map(x => ({ key: "ff:" + x.id, kind: "ff", id: x.id, label: x.name, sub: x.clears ? "Fully repaid with this 🎉" : `${inr(x.left - x.amount)} left after this`, amount: x.amount, def: true })),
+    ...(result.trading > 0 ? [{ key: "trading", kind: "trading", label: "Trading", sub: `${plan.tradingPct}% of what's left after the safety net`, amount: result.trading, def: true }] : []),
+  ];
+  const isOn = (l) => checked[l.key] ?? l.def;
+  const n = (k) => (e) => setPlan({ ...plan, [k]: e.target.value === "" ? "" : +e.target.value });
+  return (
+    <Sheet title="Salary plan" onClose={onClose}>
+      {edit ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <div style={{ flex: 2 }}><span className="lbl">Take-home salary</span><input className="in num" type="number" inputMode="numeric" value={plan.salary ?? ""} onChange={n("salary")} /></div>
+            <div style={{ flex: 1 }}><span className="lbl">Payday</span><input className="in num" type="number" min="1" max="31" value={plan.payday ?? ""} onChange={n("payday")} placeholder="1" /></div>
+          </div>
+          <div><span className="lbl">Everyday living per month {result.livingSuggested > 0 && <>· your recent average is {inr(result.livingSuggested)}</>}</span>
+            <input className="in num" type="number" inputMode="numeric" value={plan.living ?? ""} placeholder={String(result.livingSuggested || "")} onChange={n("living")} /></div>
+          <div className="row" style={{ gap: 8 }}>
+            <div style={{ flex: 1 }}><span className="lbl">Salary lands in</span>
+              <select className="in" value={fromAcc} onChange={e => setPlan({ ...plan, fromAccountId: e.target.value })}>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div style={{ flex: 1 }}><span className="lbl">Safety net account</span>
+              <select className="in" value={plan.safetyAccountId || ""} onChange={e => setPlan({ ...plan, safetyAccountId: e.target.value })}><option value="">None</option>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <div style={{ flex: 1 }}><span className="lbl">Starter safety net</span><input className="in num" type="number" inputMode="numeric" value={plan.starterTarget ?? ""} onChange={n("starterTarget")} /></div>
+            <div style={{ flex: 1 }}><span className="lbl">Full safety net</span><input className="in num" type="number" inputMode="numeric" value={plan.fullTarget ?? ""} onChange={n("fullTarget")} /></div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <div style={{ flex: 1 }}><span className="lbl">To safety net until starter (%)</span><input className="in num" type="number" value={plan.starterPct ?? 60} onChange={n("starterPct")} /></div>
+            <div style={{ flex: 1 }}><span className="lbl">After starter, until full (%)</span><input className="in num" type="number" value={plan.afterPct ?? 20} onChange={n("afterPct")} /></div>
+          </div>
+          <div><span className="lbl">To trading, once the starter net is in place (% of what's left)</span><input className="in num" type="number" value={plan.tradingPct ?? 0} onChange={n("tradingPct")} /></div>
+          <div className="foot">Monthly dues come from the Clear tab (every open debt with a monthly amount). A loan you can't prepay just needs its monthly amount there — the plan never adds extra to it. Friends & family without a monthly amount get the snowball: smallest first, or whoever you've pinned on Clear.</div>
+          <button className="btn" style={{ justifyContent: "center" }} disabled={!plan.salary} onClick={() => setEdit(false)}>See the plan</button>
+        </div>
+      ) : (
+        <>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="sub">From {inr(result.salary)} salary</span>
+            <button className="link" onClick={() => setEdit(true)}>Edit numbers</button>
+          </div>
+          <div className="panel" style={{ display: "grid", gap: 4 }}>
+            <Line l="Monthly dues" v={"− " + inr(result.duesTotal)} c={C.text} />
+            <Line l="Everyday living" v={"− " + inr(result.living)} c={C.text} />
+            <Line l="Left to plan" v={(result.leftover < 0 ? "− " : "") + inr(Math.abs(result.leftover))} c={result.leftover < 0 ? C.coral : C.teal} />
+          </div>
+          {result.leftover < 0 && <div style={{ color: C.coral, fontSize: 13.5 }}>Dues and living are more than your salary this month — lower the living figure, or check the monthly amounts on Clear.</div>}
+          {!result.safetyAcc && result.leftover > 0 && <div className="sub">Pick a safety net account in "Edit numbers" to start building one.</div>}
+          {result.trading === 0 && +plan.tradingPct > 0 && !result.tradingOk && <div className="sub">Trading starts once {result.safetyAcc?.name} reaches your starter safety net ({inr(result.starter)}).</div>}
+          <div style={{ display: "grid" }}>
+            {lines.map(l => (
+              <label key={l.key} className="li" style={{ cursor: "pointer", gap: 10 }}>
+                <input type="checkbox" checked={isOn(l)} onChange={e => setChecked(c => ({ ...c, [l.key]: e.target.checked }))} style={{ accentColor: C.primary, width: 18, height: 18 }} />
+                <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 14.5, fontWeight: 500 }}>{l.label}</div><div className="sub">{l.sub}</div></div>
+                <span className="num" style={{ fontSize: 15, color: l.isIn ? C.teal : l.kind === "ff" ? C.violet : l.kind === "safety" ? C.teal : C.text }}>{l.isIn ? "+" : ""}{inr(l.amount)}</span>
+              </label>
+            ))}
+          </div>
+          {result.nextUp && result.ffTotal > 0 && !result.ff.some(x => x.id === result.nextUp.id) && <div className="sub">After that: {result.nextUp.name.trim()}.</div>}
+          <button className="btn" style={{ justifyContent: "center", padding: 14 }} disabled={!lines.some(isOn)} onClick={() => onLog(lines.filter(isOn), fromAcc)}>Log checked from {accounts.find(a => a.id === fromAcc)?.name || "no account"}</button>
+          <div className="foot">Dues start unticked — tick them if they don't auto-debit. Paying someone else instead? Just log that on Clear; next month's plan recalculates from the real balances. This plan does the maths on your own numbers — it isn't financial advice.</div>
+        </>
+      )}
+    </Sheet>
+  );
+}
+
+/* ================================================================================================
+   WANTS & MILESTONES — reaching a milestone earns a pick; spend it on one thing you can afford
+   ================================================================================================ */
+function computeAchievements({ oblig, settings }) {
+  const since = settings.wantsSince || localDay();
+  const list = [];
+  oblig.filter(o => o.type === "family" && (o.status === "closed" || o.status === "settled") && o.closedAt && o.closedAt >= since)
+    .forEach(o => list.push({ key: "ff:" + o.id, label: "Repaid " + o.name.trim(), date: o.closedAt }));
+  const ach = settings.achieved || {};
+  if (ach.safetyStarter) list.push({ key: "safetyStarter", label: "Starter safety net reached", date: ach.safetyStarter });
+  if (ach.safetyFull) list.push({ key: "safetyFull", label: "Full safety net reached", date: ach.safetyFull });
+  if (ach.streak30) list.push({ key: "streak30", label: "30-day Money Log streak", date: ach.streak30 });
+  return list.sort((a, b) => b.date.localeCompare(a.date));
+}
+const WAIT_HOURS = 48;
+function WantsCard({ wants, picks, nextHint, onOpen }) {
+  const active = wants.filter(w => !w.boughtAt);
+  return (
+    <button className="card li-btn" onClick={onOpen} style={{ display: "block", textAlign: "left", width: "100%" }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="hd" style={{ fontWeight: 600, fontSize: 16 }}>Earned wants</div>
+        {picks > 0 && <span className="tag" style={{ color: C.amber, borderColor: C.amber }}>{picks} pick{picks > 1 ? "s" : ""} to use</span>}
+      </div>
+      <div className="sub" style={{ marginTop: 4 }}>
+        {active.length === 0 ? "List things you want. Each milestone you hit earns one pick." : picks > 0 ? "You've earned a pick — choose one thing you can afford." : nextHint ? "Next pick: " + nextHint : `${active.length} on your list`}
+      </div>
+    </button>
+  );
+}
+function WantsSheet({ settings, setSettings, achievements, picks, available, nextHint, logExpense, onClose }) {
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const wants = settings.wants || [];
+  const setWants = (fn) => setSettings(s => ({ ...s, wantsSince: s.wantsSince || localDay(), wants: fn(s.wants || []) }));
+  const nowMs = Date.now();
+  return (
+    <Sheet title="Earned wants" onClose={onClose}>
+      <div className="panel">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <span style={{ fontWeight: 600 }}>{picks} pick{picks === 1 ? "" : "s"} available</span>
+          <span className="sub">Free to spend now: <b className="num">{inr(Math.max(0, available))}</b></span>
+        </div>
+        {nextHint && <div className="sub" style={{ marginTop: 4 }}>Next pick: {nextHint}</div>}
+        {achievements.length > 0 && <div className="sub" style={{ marginTop: 6 }}>Earned: {achievements.slice(0, 4).map(a => a.label).join(" · ")}</div>}
+      </div>
+      <div style={{ display: "grid" }}>
+        {wants.filter(w => !w.boughtAt).map(w => {
+          const chosen = !!w.chosenAt;
+          const readyAt = chosen ? new Date(w.chosenAt).getTime() + WAIT_HOURS * 3600e3 : 0;
+          const ready = chosen && nowMs >= readyAt;
+          const affordable = (+w.price || 0) <= available;
+          return (
+            <div key={w.id} className="li" style={{ alignItems: "flex-start", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>{w.name}</div>
+                <div className="sub">{inr(w.price)}{chosen ? (ready ? " · ready to buy" : " · buy after " + new Date(readyAt).toLocaleString("en-IN", { weekday: "short", hour: "numeric", minute: "2-digit" })) : !affordable ? ` · ${inr(w.price - Math.max(0, available))} more than you have free` : ""}</div>
+              </div>
+              {!chosen && <button className="btn" style={{ padding: "7px 12px", fontSize: 13 }} disabled={picks < 1 || !affordable} onClick={() => setWants(ws => ws.map(x => x.id === w.id ? { ...x, chosenAt: new Date().toISOString() } : x))}>Use a pick</button>}
+              {chosen && !ready && <button className="btn ghost" style={{ padding: "7px 12px", fontSize: 13 }} onClick={() => setWants(ws => ws.map(x => x.id === w.id ? { ...x, chosenAt: null } : x))}>Changed my mind</button>}
+              {chosen && ready && <button className="btn" style={{ padding: "7px 12px", fontSize: 13, background: C.teal }} onClick={() => { logExpense({ amount: +w.price, cat: "Reward", note: w.name }); setWants(ws => ws.map(x => x.id === w.id ? { ...x, boughtAt: localDay() } : x)); }}>Bought it</button>}
+              {!chosen && <button className="ib" onClick={() => setWants(ws => ws.filter(x => x.id !== w.id))}><Trash2 size={14} /></button>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <input className="in" placeholder="Something you want" value={name} onChange={e => setName(e.target.value)} style={{ flex: 2 }} />
+        <input className="in num" type="number" inputMode="numeric" placeholder="₹" value={price} onChange={e => setPrice(e.target.value)} style={{ flex: 1 }} />
+        <button className="btn" disabled={!name.trim() || !+price} onClick={() => { setWants(ws => [...ws, { id: crypto.randomUUID(), name: name.trim(), price: +price, addedAt: localDay() }]); setName(""); setPrice(""); }}><Plus size={16} /></button>
+      </div>
+      {wants.some(w => w.boughtAt) && <div className="sub">Bought: {wants.filter(w => w.boughtAt).map(w => w.name).join(", ")}</div>}
+      <div className="foot">Milestones: fully repaying a friend or family member, reaching your starter and full safety net, and a 30-day Money Log streak. A pick can only go to something that fits in what's free to spend now (safe-to-spend, not counting your safety net). After you choose, there's a {WAIT_HOURS}-hour wait before it's marked ready — if you still want it then, buy it.</div>
+    </Sheet>
   );
 }
 function Stat({ n, l }) {
   return (
-    <div style={{ flex: 1, background: "rgba(255,255,255,.6)", borderRadius: 12, padding: "10px 12px" }}>
-      <div className="num" style={{ fontSize: 18, fontWeight: 700 }}>{n}</div>
+    <div style={{ flex: 1, background: C.surface2, borderRadius: 14, padding: "10px 12px" }}>
+      <div className="num" style={{ fontSize: 18 }}>{n}</div>
       <div style={{ fontSize: 11.5, color: C.muted }}>{l}</div>
     </div>
   );
