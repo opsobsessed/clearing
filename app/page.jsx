@@ -50,7 +50,7 @@ export default function Page() {
   if (!session) {
     return (
       <div style={shell}><div style={card}>
-        <div style={{ fontFamily: "'Fraunces',Georgia,serif", fontSize: 28, fontWeight: 600, color: C.text }}>Clearing</div>
+        <div style={{ fontFamily: "'Fraunces',Georgia,serif", fontSize: 28, fontWeight: 600, color: C.text, display: "flex", alignItems: "center", gap: 10 }}><img src="/logo.svg" alt="" width="34" height="34" style={{ borderRadius: 8 }} />Clearing</div>
         <div style={{ fontSize: 14, color: C.muted, marginTop: 4, marginBottom: 20 }}>Sign in with your email — we'll send a one-tap link.</div>
         {sent ? <div style={{ fontSize: 14, color: C.teal, fontWeight: 600 }}>Check your inbox for the sign-in link.</div> : (
           <>

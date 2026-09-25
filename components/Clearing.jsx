@@ -420,6 +420,9 @@ export default function Clearing({ userId }) {
   const [logDate, setLogDate] = useState(null); // non-null = Money Log snapshot open for that day
   const achievements = computeAchievements({ oblig, settings });
   const wantsList = settings.wants || [];
+  // Milestones you haven't been told about yet — shown as a celebration the next time the app is open.
+  const unseenAch = settings.wantsSince ? achievements.filter(a => !(settings.seenAch || []).includes(a.key)) : [];
+  const markAchSeen = () => setSettings(s => ({ ...s, seenAch: [...new Set([...(s.seenAch || []), ...unseenAch.map(a => a.key)])] }));
   const picks = Math.max(0, achievements.length - wantsList.filter(w => w.chosenAt || w.boughtAt).length);
   const safetyBal = planResult.safetyAcc ? Math.max(0, +planResult.safetyAcc.balance || 0) : 0;
   const nextWantHint = (() => {
@@ -586,13 +589,13 @@ export default function Clearing({ userId }) {
     .bar{height:8px;border-radius:99px;background:${C.line};overflow:hidden}
     .fill{height:100%;border-radius:99px}
     .foot{font-size:12px;color:${C.faint};line-height:1.55}
-    .toast{position:fixed;left:16px;right:16px;bottom:92px;max-width:488px;margin:0 auto;background:${C.inverse};color:${C.onInverse};border-radius:16px;padding:14px 16px;font-weight:600;display:flex;align-items:center;gap:10px;box-shadow:0 14px 34px -10px rgba(29,43,47,.5);z-index:60}
+    .toast{position:fixed;left:16px;right:16px;top:14px;max-width:488px;margin:0 auto;background:${C.inverse};color:${C.onInverse};border-radius:16px;padding:14px 16px;font-weight:600;display:flex;align-items:center;gap:10px;box-shadow:0 14px 34px -10px rgba(29,43,47,.5);z-index:60}
     @media (prefers-reduced-motion: no-preference){
       .fill{transition:width .7s cubic-bezier(.22,1,.36,1)}
       .card,.btn{transition:box-shadow .15s ease,transform .1s ease}
       .toast{animation:pop .35s cubic-bezier(.22,1.4,.36,1)}
       .sheet{animation:up .28s cubic-bezier(.22,1,.36,1)}
-      @keyframes pop{from{transform:translateY(16px) scale(.96);opacity:0}to{transform:none;opacity:1}}
+      @keyframes pop{from{transform:translateY(-16px) scale(.96);opacity:0}to{transform:none;opacity:1}}
       @keyframes up{from{transform:translateY(40px);opacity:.6}to{transform:none;opacity:1}}
     }
   `;
@@ -613,7 +616,7 @@ export default function Clearing({ userId }) {
     <div className="clr">
       <style>{S}</style>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 18 }}>
-        <div><div className="hd" style={{ fontSize: 28, fontWeight: 600 }}>Clearing</div>
+        <div><div className="row hd" style={{ fontSize: 28, fontWeight: 600, gap: 10 }}><Logo size={30} />Clearing</div>
           <div style={{ fontSize: 13, color: C.muted }}>What you can spend, what's due, what's left to clear.</div></div>
         <button className="ib" onClick={askNotif} style={{ color: notif === "granted" ? C.primary : C.faint }}>
           {notif === "granted" ? <BellRing size={22} /> : <Bell size={22} />}</button>
@@ -656,6 +659,18 @@ export default function Clearing({ userId }) {
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
       {tab === "clear" && <RepaymentsBreakdown {...{ payments, oblig }} />}
       {planOpen && <SalaryPlanSheet {...{ plan, setPlan, accounts }} salaryLogged={incomes.some(i => (i.date || "").slice(0, 7) === localMonth() && (i.source === "Salary" || !i.source))} result={planResult} onLog={logPlan} onClose={() => setPlanOpen(false)} />}
+      {ready && unseenAch.length > 0 && !quickAdd && !planOpen && !wantsOpen && !logDate && (
+        <Sheet title="You unlocked a pick 🎉" onClose={markAchSeen}>
+          <div className="panel" style={{ display: "grid", gap: 4 }}>
+            {unseenAch.map(a => <div key={a.key} style={{ fontSize: 15, fontWeight: 600 }}>✓ {a.label}</div>)}
+          </div>
+          <div className="sub">That's {unseenAch.length === 1 ? "one milestone" : unseenAch.length + " milestones"} closer to rebuilt. You now have {picks} pick{picks === 1 ? "" : "s"} to spend on something from your wants list — as long as it fits in what's free right now.</div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost" onClick={markAchSeen}>Later</button>
+            <button className="btn" style={{ flex: 1, justifyContent: "center" }} onClick={() => { markAchSeen(); setWantsOpen(true); }}>Choose a treat</button>
+          </div>
+        </Sheet>
+      )}
       {wantsOpen && <WantsSheet {...{ settings, setSettings, achievements, picks, logExpense }} nextHint={nextWantHint} available={safeToSpend - safetyBal} onClose={() => setWantsOpen(false)} />}
 
       {celebrate && (
@@ -2239,6 +2254,17 @@ function WantsSheet({ settings, setSettings, achievements, picks, available, nex
       {wants.some(w => w.boughtAt) && <div className="sub">Bought: {wants.filter(w => w.boughtAt).map(w => w.name).join(", ")}</div>}
       <div className="foot">Milestones: fully repaying a friend or family member, reaching your starter and full safety net, and a 30-day Money Log streak. A pick can only go to something that fits in what's free to spend now (safe-to-spend, not counting your safety net). After you choose, there's a {WAIT_HOURS}-hour wait before it's marked ready — if you still want it then, buy it.</div>
     </Sheet>
+  );
+}
+// The mark: a hexagon (six — the number both "Clearing" and your full name reduce to, ruled by
+// Venus, whose metal is copper) around a crescent moon (the Moon rules Cancer), which also reads as
+// the C of Clearing.
+function Logo({ size = 28 }) {
+  return (
+    <svg width={size} height={size} viewBox="60 60 392 392" aria-hidden="true">
+      <polygon points="256,80 408.42,168 408.42,344 256,432 103.58,344 103.58,168" fill="none" stroke={C.amber} strokeWidth="22" strokeLinejoin="round" />
+      <path d="M 308.86 166.44 A 104 104 0 1 0 308.86 345.56 A 90 90 0 1 1 308.86 166.44 Z" fill={C.primary} />
+    </svg>
   );
 }
 function Stat({ n, l }) {
