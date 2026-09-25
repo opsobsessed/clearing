@@ -1,10 +1,11 @@
 "use client";
 import { supabase } from "../lib/supabaseClient";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import MoneyLogModal from "./MoneyLog";
 import {
   Wallet, Landmark, PiggyBank, Users, Plus, Bell, BellRing, Trash2,
   ArrowRightLeft, X, Zap, ShieldCheck, Heart, Check, Download, Upload, ArrowDownUp,
-  LifeBuoy, Phone, MessageCircle, ChevronDown, ChevronUp, AlertTriangle, Scale
+  ChevronDown, ChevronUp, AlertTriangle, Camera
 } from "lucide-react";
 
 /* Clearing — money in hand, where it goes, what's due next,
@@ -37,76 +38,13 @@ const OTYPE = {
 };
 const EXP_CATS = ["Rent", "Food", "Groceries", "Transport", "Utilities", "Phone", "Medical", "Other"];
 const REMIND_DAYS = 10;
-const CONTACT_CHANNELS = ["Call", "SMS", "WhatsApp", "Email"];
-const CONTACT_TARGETS = ["Me", "Reference", "Workplace", "Family/friend"];
-const COMPLAINT_TARGETS = ["Lender's Grievance Officer", "RBI Ombudsman (cms.rbi.org.in)", "Cybercrime (1930 / cybercrime.gov.in)", "Police", "Other"];
-const COMPLAINT_STATUSES = ["Filed", "Acknowledged", "Resolved", "No response"];
-const ESCALATION_SITUATIONS = [
-  {
-    key: "legit",
-    label: "Is this lender even real?",
-    icon: ShieldCheck,
-    steps: [
-      "Open the app or its Play Store listing and look for the actual bank or NBFC name backing the loan — a genuine app has to name it, not just its own brand.",
-      "Search that name on the RBI's Digital Lending Apps directory on rbi.org.in to confirm it's tied to a currently active, non-cancelled NBFC or bank licence.",
-      "Cross-check the lender on the RBI Sachet portal (sachet.rbi.org.in) — this is specifically where fraud and unauthorised-lending complaints against an entity show up.",
-      "No named bank or NBFC, or it's not listed there? You're very likely dealing with an unregistered operator — that changes what's below, including whether it can actually touch your CIBIL and whether police, not the RBI Ombudsman, is the right first stop.",
-    ],
-    links: [
-      { label: "RBI Digital Lending Apps directory", href: "https://www.rbi.org.in/" },
-      { label: "RBI Sachet portal", href: "https://sachet.rbi.org.in/" },
-    ],
-  },
-  {
-    key: "cibil",
-    label: "Will this hit my CIBIL?",
-    icon: AlertTriangle,
-    steps: [
-      "Only RBI-regulated lenders (banks and registered NBFCs) can report to CIBIL, Experian, and CRIF — that reporting pipeline is only open to entities RBI has licensed.",
-      "So if the previous check confirmed the lender is a registered NBFC, yes — missed payments will likely show up and drag your score down.",
-      "If it isn't RBI-registered at all, it almost certainly has no way to report anything to the bureaus, no matter what's threatened on the phone. That doesn't make the debt disappear, but the CIBIL threat specifically is very often a bluff from unregistered apps.",
-      "Either way, check your real score directly and for free (CRED, OneScore, or PaisaBazaar) every month or two, so you're going by what's actually reported — not what a collector claims.",
-    ],
-  },
-  {
-    key: "threats",
-    label: "It's turned into threats or blackmail",
-    icon: AlertTriangle,
-    steps: [
-      "The moment it's abuse, threats, contacting your family or employer to shame you, or morphed/explicit photos — that's a crime, not a lending dispute anymore.",
-      "Screenshot or record everything as it happens: calls, messages, who contacted you, when. This is what makes a police or cybercrime complaint actually actionable.",
-      "Report it immediately at cybercrime.gov.in or call 1930 (National Cyber Crime Helpline, 24x7, free).",
-      "Also file a complaint at your local police station — many of these operators already have open cases against them, and a formal complaint on record protects you if they ever threaten a false counter-case.",
-    ],
-    links: [
-      { label: "cybercrime.gov.in", href: "https://cybercrime.gov.in/" },
-      { label: "Call 1930", href: "tel:1930" },
-    ],
-  },
-  {
-    key: "escalate",
-    label: "How do I formally escalate?",
-    icon: LifeBuoy,
-    steps: [
-      "Start with the lender's own Grievance Redressal Officer or Nodal Officer, in writing (email works) — they're required to respond within 30 days.",
-      "No response, or not good enough? File for free at cms.rbi.org.in under the RBI Ombudsman Scheme. No lawyer needed, no filing fee, and it explicitly covers digital lending.",
-      "Keep copies of every complaint and response — the Ombudsman process runs on paper trail, and compensation for proven mental agony (up to ₹3 lakh) has been awarded in real cases.",
-      "This route is for registered lenders. For unregistered or illegal apps, the police and cybercrime routes above matter more than the Ombudsman, since there's no licence for RBI to act against.",
-    ],
-    links: [{ label: "cms.rbi.org.in (RBI Ombudsman)", href: "https://cms.rbi.org.in/" }],
-  },
-  {
-    key: "lawyer",
-    label: "Do I need a lawyer?",
-    icon: Scale,
-    steps: [
-      "For a single harassment complaint against a registered lender, usually not — the RBI Ombudsman route above is built to be used without one.",
-      "Get a lawyer if: you've received an actual legal notice or police summons and don't understand it, the amount involved is large enough that a negotiated settlement matters, or you want to pursue the harassment itself as a criminal case rather than just a regulatory complaint.",
-      "Before paying anyone privately, check if you qualify for free legal aid through NALSA — eligibility is income-based and varies by state (usually a few lakh a year), but women and a few other categories qualify regardless of income. Apply at nalsa.gov.in or your nearest District Legal Services Authority.",
-    ],
-    links: [{ label: "nalsa.gov.in", href: "https://nalsa.gov.in/" }],
-  },
-];
+// Dates are stored as local calendar days (YYYY-MM-DD). toISOString() is UTC, which in India
+// files anything logged before 5:30am under the previous day — so always build dates locally.
+const pad2 = (n) => String(n).padStart(2, "0");
+const localDay = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const localMonth = (d = new Date()) => localDay(d).slice(0, 7);
+const INCOME_SOURCES = ["Salary", "Reimbursement", "Freelance / side income", "Refund / cashback", "Gift", "Other"];
+const incomeSourceLabel = (i) => i.source || "Untagged";
 const inr = (n) => "₹" + new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n || 0));
 
 const SEED_ACCOUNTS = [
@@ -135,10 +73,10 @@ function addMonths(d, n) { const r = new Date(d); r.setMonth(r.getMonth() + n); 
 // that week's Monday (weekly cadence), so two logs land in the "same period" regardless of which
 // day of the week they happened on.
 function warChestPeriodKey(cadence, dateStr) {
-  const d = new Date(dateStr);
+  const d = new Date(dateStr + "T00:00:00");
   if (cadence === "weekly") {
     const day = d.getDay(); const diff = (day === 0 ? -6 : 1) - day;
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff).toISOString().slice(0, 10);
+    return localDay(new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff));
   }
   return dateStr;
 }
@@ -150,8 +88,8 @@ function nextWarChestLog(wc, todayStr) {
   const lastKey = wc.lastLoggedDate ? warChestPeriodKey(wc.cadence, wc.lastLoggedDate) : null;
   if (lastKey === todayKey) return null;
   const back = wc.cadence === "weekly" ? 7 : 1;
-  const d = new Date(todayKey); d.setDate(d.getDate() - back);
-  const expectedPrevKey = d.toISOString().slice(0, 10);
+  const d = new Date(todayKey + "T00:00:00"); d.setDate(d.getDate() - back);
+  const expectedPrevKey = localDay(d);
   return { lastLoggedDate: todayStr, streak: lastKey === expectedPrevKey ? (+wc.streak || 0) + 1 : 1 };
 }
 function buildUpiLink(vpa, amount, note) {
@@ -289,54 +227,6 @@ function suggestedAPR(o) {
 /* Plain-text report for one loan — everything logged against it, in date order, meant to be
    pasted into an email/WhatsApp/doc or attached to a formal complaint. Deliberately plain text,
    not JSON, so it's readable by whoever it's shared with. */
-function buildEvidenceSummary(o, payments) {
-  const lines = [];
-  lines.push(`${o.name} — ${OTYPE[o.type]?.label || o.type}`);
-  if (o.legalName) lines.push(`Registered/legal name: ${o.legalName}`);
-  if (o.lenderContact) lines.push(`Lender contact/reference: ${o.lenderContact}`);
-  if (o.workplaceContact) lines.push(`Workplace contact used by lender: ${o.workplaceContact}`);
-  if (o.startDate) lines.push(`Loan started: ${o.startDate}`);
-  if (+o.amountTaken > 0) lines.push(`Amount taken (owed): ${inr(o.amountTaken)}`);
-  if (+o.amountReceived > 0) lines.push(`Amount received: ${inr(o.amountReceived)}`);
-  lines.push(`Outstanding: ${inr(o.outstanding)} · Paid so far: ${inr(o.paid)}`);
-  if (o.status === "settled") {
-    lines.push(`Status: SETTLED — closed for ${inr(o.settledAmount || o.paid)} instead of the full amount owed${o.settledSavings > 0 ? `, ${inr(o.settledSavings)} waived by the lender` : ""}.`);
-  }
-  if (o.closedAt) lines.push(`Closed: ${o.closedAt}`);
-  if (o.status === "closed" || o.status === "settled") {
-    lines.push(o.nocReceived ? `NOC / No Due Certificate: received${o.nocDate ? " on " + o.nocDate : ""}` : `NOC / No Due Certificate: NOT yet received — request this from the lender.`);
-  }
-  lines.push("");
-  if ((o.references || []).length) {
-    lines.push("References given to this lender:");
-    o.references.forEach(r => lines.push(`  ${r.name}${r.relation ? " (" + r.relation + ")" : ""}${r.phone ? " — " + r.phone : ""}`));
-    lines.push("");
-  }
-  const hist = (payments || []).filter(p => p.obligId === o.id).sort((a, b) => a.date.localeCompare(b.date));
-  if (hist.length) {
-    lines.push("Payments:");
-    hist.forEach(p => lines.push(`  ${p.date} — ${inr(p.amount)}${p.note ? " (" + p.note + ")" : ""}`));
-    lines.push("");
-  }
-  if ((o.settlements || []).length) {
-    lines.push("Settlement offers:");
-    [...o.settlements].sort((a, b) => a.date.localeCompare(b.date)).forEach(s =>
-      lines.push(`  ${s.date} — offered ${inr(s.offeredAmount)}${s.accepted ? " (accepted)" : ""}${s.notes ? " — " + s.notes : ""}`));
-    lines.push("");
-  }
-  if ((o.incidents || []).length) {
-    lines.push("Contact / harassment log:");
-    [...o.incidents].sort((a, b) => a.date.localeCompare(b.date)).forEach(i =>
-      lines.push(`  ${i.date} — ${i.channel} to ${i.target}${i.refName ? " (" + i.refName + ")" : ""}${i.agentName ? ", from " + i.agentName : ""}${i.recorded ? " [recorded]" : ""}${i.notes ? " — " + i.notes : ""}`));
-    lines.push("");
-  }
-  if ((o.complaints || []).length) {
-    lines.push("Complaints filed:");
-    [...o.complaints].sort((a, b) => a.date.localeCompare(b.date)).forEach(c =>
-      lines.push(`  ${c.date} — ${c.filedWith} [${c.status}]${c.refNumber ? " ref: " + c.refNumber : ""}${c.notes ? " — " + c.notes : ""}`));
-  }
-  return lines.join("\n");
-}
 
 export default function Clearing({ userId }) {
   const [tab, setTab] = useState("home");
@@ -369,22 +259,116 @@ export default function Clearing({ userId }) {
   // any transient error on load would silently reset the UI to empty, and 600ms later the autosave
   // effect below would write that empty state back over the real saved data, erasing it for good.
   // Now a genuine error leaves `ready` false — nothing renders, nothing autosaves — until Retry succeeds.
-  useEffect(() => { (async () => {
-    setLoadError(false);
-    const { data, error } = await supabase.from("user_state").select("data").eq("user_id", userId).maybeSingle();
-    if (error) { setLoadError(true); return; }
-    const d = (data && data.data) || {};
+  // ---- Sync with Supabase -------------------------------------------------------------------
+  // The whole app state is one jsonb blob per user. Because every save replaces the whole blob,
+  // a phone and a laptop used together used to overwrite each other: a device holding an older
+  // copy would save it over newer data from the other device. To prevent that:
+  //  * versionRef holds the updated_at of the copy this device last loaded/saved. Saves only
+  //    succeed if the row still has that version (optimistic concurrency). If another device
+  //    saved in between, the save is refused and we load the latest copy instead of clobbering it.
+  //  * When the app comes back into view (tab switch, phone unlocked), it pulls the latest copy.
+  //  * Pending edits are saved immediately when the app is hidden/closed, not after a delay.
+  //  * Save failures are shown instead of silently ignored.
+  const versionRef = useRef(null);        // updated_at of the copy we're based on (null = no row yet)
+  const skipSaveRef = useRef(false);      // true while applying server data, so it isn't echoed back
+  const dirtyRef = useRef(false);         // local edits not yet saved
+  const savingRef = useRef(Promise.resolve());
+  const latestRef = useRef(null);         // latest local data, for flushing outside React renders
+  const [syncMsg, setSyncMsg] = useState(null); // { kind: "error" | "info", text }
+
+  const applyRemote = (row) => {
+    const d = (row && row.data) || {};
+    versionRef.current = row ? row.updated_at : null;
+    skipSaveRef.current = true;
     setAccounts(d.accounts || []); setOblig(d.oblig || []); setExpenses(d.expenses || []);
     setPayments(d.payments || []); setIncomes(d.incomes || []); setSettings(d.settings || { buffer: 0, budget: 0 });
+  };
+  const fetchRow = () => supabase.from("user_state").select("data, updated_at").eq("user_id", userId).maybeSingle();
+
+  // Loads the saved blob before anything is allowed to render or autosave. This distinguishes a
+  // genuinely new user (no row yet, data === null, error === null) from an actual fetch failure
+  // (network hiccup, RLS issue, etc). Treating both cases the same used to be a real data-loss bug:
+  // any transient error on load would silently reset the UI to empty, and 600ms later the autosave
+  // effect below would write that empty state back over the real saved data, erasing it for good.
+  // Now a genuine error leaves `ready` false — nothing renders, nothing autosaves — until Retry succeeds.
+  useEffect(() => { (async () => {
+    setLoadError(false);
+    const { data, error } = await fetchRow();
+    if (error) { setLoadError(true); return; }
+    applyRemote(data);
     setReady(true);
   })(); }, [userId, loadAttempt]);
+
+  const saveNow = () => {
+    savingRef.current = savingRef.current.then(async () => {
+      if (!dirtyRef.current || !latestRef.current) return;
+      dirtyRef.current = false;
+      const payload = latestRef.current;
+      const now = new Date().toISOString();
+      let res;
+      if (versionRef.current) {
+        res = await supabase.from("user_state").update({ data: payload, updated_at: now })
+          .eq("user_id", userId).eq("updated_at", versionRef.current).select("updated_at");
+      } else {
+        res = await supabase.from("user_state").insert({ user_id: userId, data: payload, updated_at: now }).select("updated_at");
+        if (res.error && res.error.code === "23505") res = { data: [], error: null }; // row appeared meanwhile → conflict
+      }
+      if (res.error) {
+        dirtyRef.current = true;
+        setSyncMsg({ kind: "error", text: "Couldn't save your last change. Check your connection — we'll keep trying." });
+        return;
+      }
+      if (!res.data || res.data.length === 0) {
+        // Another device saved since we loaded. Don't overwrite it — load the newer copy.
+        const { data, error } = await fetchRow();
+        if (error) { dirtyRef.current = true; setSyncMsg({ kind: "error", text: "Couldn't sync. Check your connection — we'll keep trying." }); return; }
+        applyRemote(data);
+        setSyncMsg({ kind: "info", text: "This was updated on another device, so we loaded the latest version. Your last change here wasn't saved — please redo it." });
+        return;
+      }
+      versionRef.current = res.data[0].updated_at;
+      setSyncMsg(m => (m && m.kind === "error") ? null : m);
+    });
+    return savingRef.current;
+  };
+
   useEffect(() => {
     if (!ready) return;
-    const t = setTimeout(() => {
-      supabase.from("user_state").upsert({ user_id: userId, data: { accounts, oblig, expenses, payments, incomes, settings }, updated_at: new Date().toISOString() }).then(() => {});
-    }, 600);
+    latestRef.current = { accounts, oblig, expenses, payments, incomes, settings };
+    if (skipSaveRef.current) { skipSaveRef.current = false; return; }
+    dirtyRef.current = true;
+    const t = setTimeout(saveNow, 600);
     return () => clearTimeout(t);
   }, [accounts, oblig, expenses, payments, incomes, settings, ready, userId]);
+
+  // Retry failed saves every few seconds.
+  useEffect(() => {
+    if (!syncMsg || syncMsg.kind !== "error") return;
+    const t = setInterval(() => { if (dirtyRef.current) saveNow(); }, 5000);
+    return () => clearInterval(t);
+  }, [syncMsg]);
+
+  // Pull the latest copy when the app comes back into view; save pending edits when it's hidden.
+  useEffect(() => {
+    if (!ready) return;
+    const refresh = async () => {
+      await savingRef.current;
+      if (dirtyRef.current) return; // unsaved edits here — let the save (and its conflict check) run first
+      const { data, error } = await fetchRow();
+      if (error || dirtyRef.current) return;
+      if ((data ? data.updated_at : null) !== versionRef.current) applyRemote(data);
+    };
+    const onVis = () => { if (document.visibilityState === "visible") refresh(); else if (dirtyRef.current) saveNow(); };
+    const onHide = () => { if (dirtyRef.current) saveNow(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [ready, userId]);
   useEffect(() => { if (!celebrate) return; const t = setTimeout(() => setCelebrate(null), 4000); return () => clearTimeout(t); }, [celebrate]);
 
   useEffect(() => {
@@ -398,6 +382,37 @@ export default function Clearing({ userId }) {
     })();
   }, [ready, notif, oblig]);
 
+  // Shared by Quick add and the Accounts tab so an entry always updates the account balance too.
+  const logExpense = ({ amount, cat, note, date, accountId }) => {
+    setExpenses(x => [...x, { id: crypto.randomUUID(), amount, cat, note: note || "", date: date || localDay(), accountId: accountId || "" }]);
+    if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) - amount } : a));
+    if (accountId && accountId !== settings.lastAccountId) setSettings(s => ({ ...s, lastAccountId: accountId }));
+  };
+  const logIncome = ({ amount, source, note, date, accountId }) => {
+    setIncomes(x => [...x, { id: crypto.randomUUID(), amount, source: source || "Other", note: note || "", date: date || localDay(), accountId: accountId || "" }]);
+    if (accountId) setAccounts(x => x.map(a => a.id === accountId ? { ...a, balance: (+a.balance || 0) + amount } : a));
+  };
+  const [quickAdd, setQuickAdd] = useState(false);
+  const [logDate, setLogDate] = useState(null); // non-null = Money Log snapshot open for that day
+  const snapshotInput = useMemo(() => ({ expenses, payments, incomes, oblig, sourceLabel: incomeSourceLabel, budget: settings.budget }), [expenses, payments, incomes, oblig, settings.budget]);
+  const firstEntryDate = useMemo(() => [...expenses, ...incomes, ...payments].map(x => x.date).filter(Boolean).sort()[0] || localDay(), [expenses, incomes, payments]);
+  // Day numbers count posts, not calendar days: the next post is your last posted day + 1, so a
+  // missed day doesn't break the sequence. Before the first post, it counts from your first entry.
+  const logPosts = settings.logPosts || {};
+  const suggestedDay = (d) => {
+    const before = Object.keys(logPosts).filter(k => k < d).sort();
+    if (before.length) return (+logPosts[before[before.length - 1]].day || 0) + 1;
+    return Math.max(1, Math.round((new Date(d + "T00:00:00") - new Date(firstEntryDate + "T00:00:00")) / 86400000) + 1);
+  };
+  const todayKey = localDay();
+  const postedToday = logPosts[todayKey];
+  // Posting streak: consecutive calendar days with a post, ending today (or yesterday, if today isn't posted yet).
+  const postStreak = (() => {
+    let n = 0; const d = new Date(); if (!postedToday) d.setDate(d.getDate() - 1);
+    while (logPosts[localDay(d)]) { n++; d.setDate(d.getDate() - 1); }
+    return n;
+  })();
+
   const moneyInHand = accounts.reduce((s, a) => s + (+a.balance || 0), 0);
   const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
   const dueSoon = openOblig
@@ -406,7 +421,7 @@ export default function Clearing({ userId }) {
     .sort((a, b) => (b.overdue ? 1 : 0) - (a.overdue ? 1 : 0) || a.in - b.in);
   const setAside = dueSoon.reduce((s, o) => s + (+o.monthly || 0), 0);
   const safeToSpend = moneyInHand - setAside - (+settings.buffer || 0);
-  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthKey = localMonth();
   const monthExp = expenses.filter(e => e.date.slice(0, 7) === monthKey);
   const monthSpend = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
 
@@ -430,7 +445,7 @@ export default function Clearing({ userId }) {
   // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
   // optional UPI deep link) is still on the person, this just keeps score.
   function logWarChest(accountId) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
     const step = nextWarChestLog(acc.warChest, today);
@@ -541,6 +556,18 @@ export default function Clearing({ userId }) {
           {notif === "granted" ? <BellRing size={22} /> : <Bell size={22} />}</button>
       </div>
 
+      {syncMsg && (
+        <div className="card" style={{ marginBottom: 14, borderColor: syncMsg.kind === "error" ? C.coral : C.line, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <div style={{ flex: 1, fontSize: 13 }}>{syncMsg.text}</div>
+          <button className="ib" onClick={() => setSyncMsg(null)} aria-label="Dismiss"><X size={16} /></button>
+        </div>
+      )}
+      {tab === "home" && (
+        <button className="btn ghost" onClick={() => setLogDate(localDay())} style={{ width: "100%", marginBottom: 14, flexDirection: "column", gap: 2 }}>
+          <span className="row" style={{ gap: 6 }}><Camera size={16} /> {postedToday ? `Day ${postedToday.day} posted ✓` : `Today's Money Log · Day ${suggestedDay(todayKey)}`}</span>
+          <span style={{ fontSize: 11.5, fontWeight: 500, opacity: .75 }}>{postedToday ? "Tap to re-share or make the month wrap-up" : "Not posted yet — tap to make and share it"}{postStreak > 1 ? ` · ${postStreak}-day streak` : ""}</span>
+        </button>
+      )}
       {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "home" && (
         <div className="card" style={{ marginTop: 14 }}>
@@ -555,18 +582,32 @@ export default function Clearing({ userId }) {
           </div>
         </div>
       )}
-      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, setIncomes, settings, setSettings }} />}
+      {tab === "accounts" && <Accounts {...{ accounts, setAccounts, moneyInHand, setExpenses, incomes, logIncome, settings, setSettings }} />}
       {tab === "activity" && <Activity {...{ expenses, payments, incomes, oblig, accounts }} />}
       {tab === "spending" && <Spending {...{ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
-      {tab === "support" && <Support />}
 
       {celebrate && (
         <div className="toast"><Heart size={18} fill="#fff" /><span>{celebrate}</span></div>
       )}
 
+      {!quickAdd && !logDate && (
+        <button onClick={() => setQuickAdd(true)} aria-label="Quick add"
+          style={{ position: "fixed", right: "max(16px, calc(50vw - 244px))", bottom: 86, width: 58, height: 58, borderRadius: 99, border: "none", background: C.primary, color: "#fff", boxShadow: "0 6px 18px rgba(4,27,60,.28)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 40 }}>
+          <Plus size={28} />
+        </button>
+      )}
+      {quickAdd && <QuickAdd {...{ accounts, expenses, settings, logExpense, logIncome }} onClose={(m) => { setQuickAdd(false); if (m) setCelebrate(m); }} />}
+      {logDate && (
+        <MoneyLogModal date={logDate} onDateChange={setLogDate} snapshotInput={snapshotInput} suggestedDay={suggestedDay(logDate)}
+          posts={logPosts} customQuotes={settings.quotes || []}
+          onAddQuote={(q) => setSettings(s => ({ ...s, quotes: [...(s.quotes || []), q] }))}
+          onPosted={(d, rec) => setSettings(s => ({ ...s, logPosts: { ...(s.logPosts || {}), [d]: rec } }))}
+          reminder={settings.logReminder} onReminder={(on) => setSettings(s => ({ ...s, logReminder: on }))}
+          onClose={() => setLogDate(null)} />
+      )}
       <div className="tabbar">
-        {[["home", "Home", Wallet], ["accounts", "Accounts", Landmark], ["activity", "Activity", ArrowDownUp], ["spending", "Spending", PiggyBank], ["clear", "Clear", Users], ["support", "Support", LifeBuoy]]
+        {[["home", "Home", Wallet], ["accounts", "Accounts", Landmark], ["activity", "Activity", ArrowDownUp], ["spending", "Spending", PiggyBank], ["clear", "Clear", Users]]
           .map(([id, label, Icon]) => (
             <button key={id} className={tab === id ? "on" : ""} onClick={() => setTab(id)}><Icon size={20} /><span>{label}</span></button>
           ))}
@@ -598,7 +639,7 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
         const wcAccount = accounts.find(a => a.warChest?.on);
         if (!wcAccount) return null;
         const wc = wcAccount.warChest;
-        const today = new Date().toISOString().slice(0, 10);
+        const today = localDay();
         const alreadyLogged = !nextWarChestLog(wc, today);
         const upiLink = wc.vpa ? buildUpiLink(wc.vpa, wc.target, "War chest") : null;
         return (
@@ -763,20 +804,22 @@ function ChartLegend({ items }) {
   );
 }
 
-function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes, settings, setSettings }) {
+function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, incomes, logIncome, settings, setSettings }) {
   const [adding, setAdding] = useState(false);
   const [moving, setMoving] = useState(false);
   const [income, setIncome] = useState(false);
   const [reconc, setReconc] = useState(null);
   const seed = () => setAccounts(SEED_ACCOUNTS.map(a => ({ ...a, id: crypto.randomUUID(), balance: 0 })));
-  const addIncome = (id, amt) => {
-    setAccounts(x => x.map(a => a.id === id ? { ...a, balance: (+a.balance || 0) + amt } : a));
-    setIncomes(x => [...x, { id: crypto.randomUUID(), accountId: id, amount: amt, date: new Date().toISOString().slice(0, 10) }]);
-    setIncome(false);
-  };
+  const addIncome = (entry) => { logIncome(entry); setIncome(false); };
+  const monthKey = localMonth();
+  const monthIn = (incomes || []).filter(i => (i.date || "").slice(0, 7) === monthKey);
+  const inBySource = Object.entries(monthIn.reduce((m, i) => { const k = incomeSourceLabel(i); m[k] = (m[k] || 0) + (+i.amount || 0); return m; }, {}))
+    .map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value)
+    .map((x, i) => ({ ...x, color: CHART_PALETTE[i % CHART_PALETTE.length] }));
+  const inTotal = inBySource.reduce((s, x) => s + x.value, 0);
   function reconcile(id, actual) {
     const acc = accounts.find(a => a.id === id); const diff = (+acc.balance || 0) - actual;
-    if (diff > 0) setExpenses(x => [...x, { id: crypto.randomUUID(), amount: diff, cat: "Other", date: new Date().toISOString().slice(0, 10), accountId: id, note: "cash correction" }]);
+    if (diff > 0) setExpenses(x => [...x, { id: crypto.randomUUID(), amount: diff, cat: "Other", date: localDay(), accountId: id, note: "cash correction" }]);
     setAccounts(x => x.map(a => a.id === id ? { ...a, balance: actual } : a)); setReconc(null);
   }
   const add = (a) => { setAccounts(x => [...x, { ...a, id: crypto.randomUUID() }]); setAdding(false); };
@@ -787,16 +830,6 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes,
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {!settings.seenAccountsIntro && (
-        <div className="card" style={{ border: "1px solid " + C.line }}>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>This tab is separate from Clear, on purpose</div>
-          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.5 }}>
-            Clear tracks what you owe. This tracks what you actually have — your bank balance, your cash. Different questions, different tabs.
-            They only touch when you log a payment: pick an account there (optional) and this balance updates with it, which is what keeps "Safe to spend" on Home accurate. Skip it and Clear still works fine — you just won't get that number.
-          </div>
-          <button className="btn" onClick={() => setSettings(s => ({ ...s, seenAccountsIntro: true }))} style={{ marginTop: 10, padding: "7px 14px", fontSize: 13 }}>Got it</button>
-        </div>
-      )}
       {accounts.length === 0 && (
         <div className="card"><div style={{ fontWeight: 600, marginBottom: 6 }}>Add your first account</div>
           <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Add each real place you hold money — your bank account, your wallet cash, whatever else. One is enough to get started; split into more only if you want per-account accuracy.</div>
@@ -821,6 +854,17 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes,
         <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Account</button>
       </div>
       {income && <IncomeForm accounts={accounts} onAdd={addIncome} onCancel={() => setIncome(false)} />}
+      <div className="card">
+        <div className="lbl">Money in this month</div>
+        <div className="num" style={{ fontSize: 26, fontWeight: 700 }}>{inr(inTotal)}</div>
+        {inBySource.length > 0 ? (
+          <div className="row" style={{ gap: 14, marginTop: 10, alignItems: "center" }}>
+            <PieChart slices={inBySource} size={96} />
+            <ChartLegend items={inBySource} />
+          </div>
+        ) : <Empty>Nothing logged in yet this month. Use "Add income" for salary, reimbursements, side income and anything else that comes in.</Empty>}
+        {monthIn.some(i => !i.source) && <div className="foot" style={{ marginTop: 8 }}>"Untagged" is income logged before sources existed.</div>}
+      </div>
       {moving && <MoveForm accounts={accounts} onMove={move} onCancel={() => setMoving(false)} />}
       {adding && <AccountForm onSave={add} onCancel={() => setAdding(false)} />}
       {accounts.map(a => (
@@ -875,14 +919,102 @@ function Accounts({ accounts, setAccounts, moneyInHand, setExpenses, setIncomes,
   );
 }
 function IncomeForm({ accounts, onAdd, onCancel }) {
-  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id);
+  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id || "");
   const [amt, setAmt] = useState("");
+  const [source, setSource] = useState("Salary");
+  const [custom, setCustom] = useState("");
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(localDay());
+  const finalSource = source === "Other" ? (custom.trim() || "Other") : source;
+  const ok = +amt > 0;
   return (
     <div className="card" style={{ display: "grid", gap: 10 }}>
       <div className="row" style={{ justifyContent: "space-between" }}><div style={{ fontWeight: 600 }}>Add income</div><button className="ib" onClick={onCancel}><X size={18} /></button></div>
-      <select className="in" value={acc} onChange={e => setAcc(e.target.value)}>{accounts.map(a => <option key={a.id} value={a.id}>{a.name} — {inr(a.balance)}</option>)}</select>
-      <input className="in num" type="number" placeholder="Amount received (salary, etc.)" value={amt} onChange={e => setAmt(e.target.value)} autoFocus />
-      <button className="btn" disabled={!amt || !acc} onClick={() => onAdd(acc, +amt)} style={{ opacity: (amt && acc) ? 1 : 0.5 }}>Add to account</button>
+      <input className="in num" type="number" inputMode="decimal" placeholder="Amount received" value={amt} onChange={e => setAmt(e.target.value)} autoFocus />
+      <SourcePicker source={source} setSource={setSource} custom={custom} setCustom={setCustom} />
+      <input className="in" placeholder="Note (optional) — e.g. Sept salary, cab reimbursement" value={note} onChange={e => setNote(e.target.value)} />
+      <div className="row" style={{ gap: 8 }}>
+        <select className="in" style={{ flex: 1 }} value={acc} onChange={e => setAcc(e.target.value)}>
+          <option value="">No account</option>
+          {accounts.map(a => <option key={a.id} value={a.id}>{a.name} — {inr(a.balance)}</option>)}
+        </select>
+        <input className="in" type="date" style={{ flex: 1 }} value={date} onChange={e => setDate(e.target.value || localDay())} />
+      </div>
+      <button className="btn" disabled={!ok} onClick={() => onAdd({ accountId: acc, amount: +amt, source: finalSource, note: note.trim(), date })} style={{ opacity: ok ? 1 : 0.5 }}>Add income</button>
+    </div>
+  );
+}
+function SourcePicker({ source, setSource, custom, setCustom }) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        {INCOME_SOURCES.map(x => (
+          <button key={x} className="chip" onClick={() => setSource(x)}
+            style={{ cursor: "pointer", background: source === x ? C.teal : "transparent", color: source === x ? "#fff" : C.muted, border: "1px solid " + (source === x ? C.teal : C.line) }}>{x}</button>
+        ))}
+      </div>
+      {source === "Other" && <input className="in" placeholder="Where's it from? (e.g. Sold old phone)" value={custom} onChange={e => setCustom(e.target.value)} />}
+    </div>
+  );
+}
+// One-tap logging from any tab: a big amount field, recent categories first, and the account you
+// used last time already picked — so logging a spend on the go takes a few seconds.
+function QuickAdd({ accounts, expenses, settings, logExpense, logIncome, onClose }) {
+  const [mode, setMode] = useState("out");
+  const [amt, setAmt] = useState("");
+  const [note, setNote] = useState("");
+  const [date, setDate] = useState(localDay());
+  const allCats = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
+  const recent = [...new Set([...(expenses || [])].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(e => e.cat).filter(Boolean))];
+  const cats = [...new Set([...recent.filter(c => allCats.includes(c)).slice(0, 4), ...allCats])];
+  const [cat, setCat] = useState(cats[0] || "Other");
+  const [source, setSource] = useState("Salary");
+  const [custom, setCustom] = useState("");
+  const [acc, setAcc] = useState(settings.lastAccountId && accounts.some(a => a.id === settings.lastAccountId) ? settings.lastAccountId : (accounts.find(a => a.purpose === "living")?.id || accounts[0]?.id || ""));
+  const [inAcc, setInAcc] = useState(accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id || "");
+  const yesterday = localDay(new Date(Date.now() - 86400000));
+  const ok = +amt > 0;
+  function save() {
+    if (!ok) return;
+    if (mode === "out") logExpense({ amount: +amt, cat, note: note.trim(), date, accountId: acc });
+    else logIncome({ amount: +amt, source: source === "Other" ? (custom.trim() || "Other") : source, note: note.trim(), date, accountId: inAcc });
+    onClose(mode === "out" ? `Logged ${inr(+amt)} · ${cat}` : `Logged ${inr(+amt)} in · ${source === "Other" ? (custom.trim() || "Other") : source}`);
+  }
+  const tabBtn = (id, label, color) => (
+    <button className="btn ghost" onClick={() => setMode(id)} style={{ flex: 1, borderColor: mode === id ? color : C.line, color: mode === id ? color : C.muted, fontWeight: 700 }}>{label}</button>
+  );
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,28,40,.45)", zIndex: 55, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => onClose()}>
+      <div className="card" style={{ width: "100%", maxWidth: 520, borderRadius: "18px 18px 0 0", display: "grid", gap: 12, paddingBottom: 28 }} onClick={e => e.stopPropagation()}>
+        <div className="row" style={{ gap: 8 }}>
+          {tabBtn("out", "Spent", C.coral)}{tabBtn("in", "Received", C.teal)}
+          <button className="ib" onClick={() => onClose()} aria-label="Close"><X size={20} /></button>
+        </div>
+        <input className="in num" type="number" inputMode="decimal" placeholder="₹ 0" value={amt} onChange={e => setAmt(e.target.value)} autoFocus
+          onKeyDown={e => { if (e.key === "Enter") save(); }} style={{ fontSize: 30, fontWeight: 700, textAlign: "center", padding: "14px" }} />
+        {mode === "out" ? (
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            {cats.map(c => (
+              <button key={c} className="chip" onClick={() => setCat(c)}
+                style={{ cursor: "pointer", padding: "7px 12px", fontSize: 13, background: cat === c ? C.primary : "transparent", color: cat === c ? "#fff" : C.muted, border: "1px solid " + (cat === c ? C.primary : C.line) }}>{c}</button>
+            ))}
+          </div>
+        ) : <SourcePicker source={source} setSource={setSource} custom={custom} setCustom={setCustom} />}
+        <input className="in" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
+        <div className="row" style={{ gap: 8 }}>
+          {accounts.length > 0 && (
+            <select className="in" style={{ flex: 1 }} value={mode === "out" ? acc : inAcc} onChange={e => (mode === "out" ? setAcc : setInAcc)(e.target.value)}>
+              <option value="">No account</option>
+              {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          )}
+          <button className="chip" onClick={() => setDate(date === yesterday ? localDay() : yesterday)}
+            style={{ cursor: "pointer", padding: "9px 12px", background: "transparent", border: "1px solid " + C.line, color: C.muted, whiteSpace: "nowrap" }}>
+            {date === localDay() ? "Today" : date === yesterday ? "Yesterday" : date} ⇄
+          </button>
+        </div>
+        <button className="btn" disabled={!ok} onClick={save} style={{ opacity: ok ? 1 : 0.5, padding: 14, fontSize: 16 }}>{mode === "out" ? "Log spend" : "Log income"}</button>
+      </div>
     </div>
   );
 }
@@ -936,7 +1068,7 @@ function MoveForm({ accounts, onMove, onCancel }) {
 }
 
 function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setSettings, monthExp, monthSpend, payments, oblig }) {
-  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", note: "", date: new Date().toISOString().slice(0, 10), accountId: "" });
+  const [f, setF] = useState({ amount: "", cat: "Food", custom: "", note: "", date: localDay(), accountId: "" });
   const [addingCat, setAddingCat] = useState(false);
   const [newCat, setNewCat] = useState("");
   const [editingCats, setEditingCats] = useState(false);
@@ -944,7 +1076,7 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
   const list = [...monthExp].sort((a, b) => b.date.localeCompare(a.date));
   const over = settings.budget > 0 && monthSpend > settings.budget;
   const categoryOptions = settings.categories && settings.categories.length ? settings.categories : EXP_CATS;
-  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthKey = localMonth();
   // Loan/debt repayments live in `payments`, not `expenses` — folded in here as one more slice
   // ("Loan repayments") so the category breakdown gives the full picture of where money went, not
   // just discretionary spending. The monthly budget total above stays expenses-only on purpose,
@@ -965,7 +1097,7 @@ function Spending({ expenses, setExpenses, accounts, setAccounts, settings, setS
   ].filter(x => x.total > 0).sort((a, b) => b.total - a.total);
   const colorFor = (x, i) => x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length];
   const now = new Date();
-  const lastMonthKey = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 7);
+  const lastMonthKey = localMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1));
   const lastMonthSpend = expenses.filter(e => e.date.slice(0, 7) === lastMonthKey).reduce((s, e) => s + (+e.amount || 0), 0);
   const trendPct = lastMonthSpend > 0 ? Math.round(((monthSpend - lastMonthSpend) / lastMonthSpend) * 100) : null;
   function add() {
@@ -1125,22 +1257,14 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const [payFor, setPayFor] = useState(null);
   const [settleFor, setSettleFor] = useState(null);
   // Which single debt currently has its "Edit" panel open — everything past the basics (APR,
-  // monthly/due day, loan origin, contacts, CIBIL/calls/credit-card toggles, payment history, and
-  // the evidence log) lives behind this one toggle so the default list stays scannable.
+  // monthly/due day, loan origin, CIBIL/calls/credit-card toggles, and payment history) lives
+  // behind this one toggle so the default list stays scannable.
   const [expandedId, setExpandedId] = useState(null);
-  const [evidenceForm, setEvidenceForm] = useState(null); // { obligId, kind: 'incident'|'complaint'|'settlement' }
-  const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [search, setSearch] = useState("");
   // Which type-groups' cleared debts are expanded — closed/settled debts sink to the bottom of
   // their group and stay collapsed by default, so the default view is just what's still pending.
   const [showClosed, setShowClosed] = useState({});
   const [deltaExtra, setDeltaExtra] = useState(5000);
-  function clearAllDebts() {
-    setOblig([]);
-    setPayments([]);
-    setConfirmClearAll(false);
-    onCelebrate("All debts cleared. Add your real numbers whenever you're ready.");
-  }
   function seed() {
     setOblig(SEED_OBLIG.map(o => ({
       id: crypto.randomUUID(), name: o.name, type: o.type, outstanding: o.outstanding || 0, apr: 0, paid: 0, monthly: 0, dueDay: "", status: "open",
@@ -1163,7 +1287,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   function pay(id, amt, accountId, note) {
     const o = oblig.find(x => x.id === id);
     const closes = o && (+o.outstanding || 0) - amt <= 0;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     setOblig(x => x.map(o => {
       if (o.id !== id) return o;
       const outstanding = Math.max(0, (+o.outstanding || 0) - amt);
@@ -1181,7 +1305,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     const o = oblig.find(x => x.id === id);
     if (!o) return;
     const waived = Math.max(0, (+o.outstanding || 0) - amt);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     setOblig(x => x.map(o => o.id === id
       ? { ...o, outstanding: 0, paid: (+o.paid || 0) + amt, status: "settled", closedAt: today, settledAmount: amt, settledSavings: waived }
       : o));
@@ -1232,21 +1356,6 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   function unprioritize(id) {
     setOblig(x => x.map(o => o.id === id ? { ...o, priority: null } : o));
   }
-  function addEvidence(id, key, entry) {
-    setOblig(x => x.map(o => o.id === id ? { ...o, [key]: [...(o[key] || []), { ...entry, id: crypto.randomUUID() }] } : o));
-  }
-  function removeEvidence(id, key, entryId) {
-    setOblig(x => x.map(o => o.id === id ? { ...o, [key]: (o[key] || []).filter(e => e.id !== entryId) } : o));
-  }
-  function copySummary(o) {
-    const text = buildEvidenceSummary(o, payments);
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(
-        () => onCelebrate("Summary copied — paste it anywhere."),
-        () => onCelebrate("Couldn't copy — your browser blocked it.")
-      );
-    }
-  }
   const groups = Object.keys(OTYPE).map(t => ({ t, items: oblig.filter(o => o.type === t) }));
   const q = search.trim().toLowerCase();
   const filteredGroups = q
@@ -1266,7 +1375,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
   const grandTotal = totalOwed + clearedAll;
   const pctCleared = grandTotal > 0 ? (clearedAll / grandTotal) * 100 : 0;
   const closedCount = oblig.filter(o => o.status === "closed" || o.status === "settled").length;
-  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthKey = localMonth();
   const clearedThisMonth = (payments || []).filter(p => p.date.slice(0, 7) === monthKey).reduce((s, p) => s + (+p.amount || 0), 0);
   const feeCostDebts = oblig.filter(o => +o.amountTaken > 0 && +o.amountReceived > 0 && +o.amountTaken > +o.amountReceived);
   const totalFeeCost = feeCostDebts.reduce((s, o) => s + (+o.amountTaken - +o.amountReceived), 0);
@@ -1317,23 +1426,10 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
 
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" onClick={() => setAdding(true)} style={{ flex: 1 }}><Plus size={16} /> Add something to clear</button>
-        {oblig.length > 0 && (
-          <button className="btn ghost" onClick={() => setConfirmClearAll(true)} style={{ borderColor: C.coral, color: C.coral }}><Trash2 size={16} /> Clear all</button>
-        )}
       </div>
       {adding && <ObligForm onSave={add} onCancel={() => setAdding(false)} />}
       {oblig.length > 3 && (
         <input className="in" placeholder="Search a loan or person…" value={search} onChange={e => setSearch(e.target.value)} />
-      )}
-      {confirmClearAll && (
-        <div className="card" style={{ border: "1px solid " + C.coral }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: C.coral }}>Clear every debt?</div>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>This removes all {oblig.length} {oblig.length === 1 ? "entry" : "entries"} on this tab — including outstanding amounts, payment history, and any evidence log — so you can re-enter your real numbers from scratch. Your accounts and spending on other tabs aren't touched.</div>
-          <div className="row" style={{ gap: 8 }}>
-            <button className="btn ghost" onClick={() => setConfirmClearAll(false)} style={{ flex: 1 }}>Cancel</button>
-            <button className="btn" onClick={clearAllDebts} style={{ flex: 1, background: C.coral }}>Yes, clear all</button>
-          </div>
-        </div>
       )}
 
       {noMatches && <div className="card"><Empty>No loan or person matches "{search}".</Empty></div>}
@@ -1349,7 +1445,6 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
             const history = payments.filter(p => p.obligId === o.id).sort((a, b) => b.date.localeCompare(a.date));
             const od = overdueInfo(o, payments);
             const aprHint = suggestedAPR(o);
-            const evidenceCount = (o.incidents || []).length + (o.complaints || []).length + (o.settlements || []).length;
             const minVsFull = o.isCreditCard && +o.outstanding > 0 ? {
               min: simulateMinPayment(+o.outstanding, +o.apr || 0),
               fixed6: simulateFixedPayoff(+o.outstanding, +o.apr || 0, 6),
@@ -1390,7 +1485,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       <span style={{ fontSize: 11.5, color: C.muted }}>
                         {o.nocReceived ? <>NOC / No Due Certificate received{o.nocDate ? " on " + o.nocDate : ""}</> : "NOC / No Due Certificate not marked received"}
                       </span>
-                      <button className="chip" onClick={() => upd(o.id, { nocReceived: !o.nocReceived, nocDate: !o.nocReceived ? new Date().toISOString().slice(0, 10) : o.nocDate })}
+                      <button className="chip" onClick={() => upd(o.id, { nocReceived: !o.nocReceived, nocDate: !o.nocReceived ? localDay() : o.nocDate })}
                         style={{ background: o.nocReceived ? C.teal : "transparent", border: "1px solid " + (o.nocReceived ? C.teal : C.coral), color: o.nocReceived ? "#fff" : C.coral, cursor: "pointer", whiteSpace: "nowrap" }}>
                         {o.nocReceived ? "✓ received" : "mark received"}
                       </button>
@@ -1453,11 +1548,6 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                           <input className="in num" style={{ padding: "5px 8px", fontSize: 12 }} type="number" placeholder="0" value={o.amountReceived || ""} onChange={e => upd(o.id, { amountReceived: +e.target.value })} /></div>
                       </div>
                     </div>
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Lender contact / account ref (optional)" value={o.lenderContact || ""} onChange={e => upd(o.id, { lenderContact: e.target.value })} />
-                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Registered / legal name (optional)" value={o.legalName || ""} onChange={e => upd(o.id, { legalName: e.target.value })} />
-                      <input className="in" style={{ padding: "5px 8px", fontSize: 12 }} placeholder="Workplace contact (optional)" value={o.workplaceContact || ""} onChange={e => upd(o.id, { workplaceContact: e.target.value })} />
-                    </div>
                     <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                       <button className="chip" onClick={() => o.priority != null ? unprioritize(o.id) : prioritize(o.id)}
                         style={{ background: "transparent", border: "1px solid " + (o.priority != null ? C.violet : C.line), color: o.priority != null ? C.violet : C.muted, cursor: "pointer" }}>
@@ -1492,84 +1582,6 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       </div>
                     )}
 
-                    <div>
-                      <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: evidenceCount > 0 ? C.coral : C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Evidence log ({evidenceCount})</span>
-                        <button className="btn ghost" onClick={() => copySummary(o)} style={{ fontSize: 11, padding: "4px 8px" }}>Copy summary</button>
-                      </div>
-
-                      <div style={{ marginBottom: 10 }}>
-                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>References given to this lender</span>
-                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" ? null : { obligId: o.id, kind: "reference" })}><Plus size={14} /></button>
-                        </div>
-                        {(o.references || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "reference") && <div className="foot">None logged yet.</div>}
-                        {(o.references || []).map(r => (
-                          <div key={r.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 12, color: C.muted }}>{r.name}{r.relation ? ` (${r.relation})` : ""}{r.phone ? " — " + r.phone : ""}</span>
-                            <button className="ib" onClick={() => removeEvidence(o.id, "references", r.id)}><Trash2 size={12} /></button>
-                          </div>
-                        ))}
-                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "reference" && (
-                          <ReferenceForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "references", entry); setEvidenceForm(null); }} />
-                        )}
-                      </div>
-
-                      <div style={{ marginBottom: 10 }}>
-                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Contact / harassment log</span>
-                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" ? null : { obligId: o.id, kind: "incident" })}><Plus size={14} /></button>
-                        </div>
-                        {(o.incidents || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "incident") && <div className="foot">Nothing logged yet.</div>}
-                        {[...(o.incidents || [])].sort((a, b) => b.date.localeCompare(a.date)).map(i => (
-                          <div key={i.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 12, color: C.muted }}>
-                              {i.date} — {i.channel} to {i.target}{i.refName ? ` (${i.refName})` : ""}{i.agentName ? `, from ${i.agentName}` : ""}{i.recorded ? " · recorded" : ""}
-                              {i.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{i.notes}</span> : null}
-                            </span>
-                            <button className="ib" onClick={() => removeEvidence(o.id, "incidents", i.id)}><Trash2 size={12} /></button>
-                          </div>
-                        ))}
-                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "incident" && (
-                          <IncidentForm references={o.references || []} workplaceContact={o.workplaceContact}
-                            onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "incidents", entry); setEvidenceForm(null); }} />
-                        )}
-                      </div>
-
-                      <div style={{ marginBottom: 10 }}>
-                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Complaints filed</span>
-                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" ? null : { obligId: o.id, kind: "complaint" })}><Plus size={14} /></button>
-                        </div>
-                        {(o.complaints || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint") && <div className="foot">Nothing filed yet.</div>}
-                        {[...(o.complaints || [])].sort((a, b) => b.date.localeCompare(a.date)).map(c => (
-                          <div key={c.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 12, color: C.muted }}>{c.date} — {c.filedWith} [{c.status}]{c.refNumber ? " · ref " + c.refNumber : ""}{c.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{c.notes}</span> : null}</span>
-                            <button className="ib" onClick={() => removeEvidence(o.id, "complaints", c.id)}><Trash2 size={12} /></button>
-                          </div>
-                        ))}
-                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "complaint" && (
-                          <ComplaintForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "complaints", entry); setEvidenceForm(null); }} />
-                        )}
-                      </div>
-
-                      <div>
-                        <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>Settlement offers</span>
-                          <button className="ib" onClick={() => setEvidenceForm(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" ? null : { obligId: o.id, kind: "settlement" })}><Plus size={14} /></button>
-                        </div>
-                        {(o.settlements || []).length === 0 && !(evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement") && <div className="foot">None logged yet.</div>}
-                        {[...(o.settlements || [])].sort((a, b) => b.date.localeCompare(a.date)).map(s => (
-                          <div key={s.id} className="row" style={{ justifyContent: "space-between", padding: "3px 0", alignItems: "flex-start" }}>
-                            <span style={{ fontSize: 12, color: C.muted }}>{s.date} — offered {inr(s.offeredAmount)}{s.accepted ? " (accepted)" : ""}{s.notes ? <span style={{ display: "block", color: C.faint, fontStyle: "italic" }}>{s.notes}</span> : null}</span>
-                            <button className="ib" onClick={() => removeEvidence(o.id, "settlements", s.id)}><Trash2 size={12} /></button>
-                          </div>
-                        ))}
-                        {evidenceForm?.obligId === o.id && evidenceForm.kind === "settlement" && (
-                          <SettlementForm onCancel={() => setEvidenceForm(null)} onSave={(entry) => { addEvidence(o.id, "settlements", entry); setEvidenceForm(null); }} />
-                        )}
-                      </div>
-                    </div>
                   </div>
                 )}
               </div>
@@ -1680,8 +1692,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
 function ObligForm({ onSave, onCancel }) {
   const [f, setF] = useState({
     name: "", type: "family", outstanding: 0, monthly: 0, dueDay: "", apr: 0, cibilImpact: false, harassment: false,
-    paymentType: "installments", isCreditCard: false, startDate: "", amountTaken: 0, amountReceived: 0, lenderContact: "",
-    legalName: "", workplaceContact: "",
+    paymentType: "installments", isCreditCard: false, startDate: "", amountTaken: 0, amountReceived: 0,
   });
   const pickType = (t) => setF(s => ({ ...s, type: t, cibilImpact: t === "regulated", harassment: t === "payday" }));
   return (
@@ -1691,13 +1702,6 @@ function ObligForm({ onSave, onCancel }) {
       <div className="row" style={{ gap: 6 }}>{Object.keys(OTYPE).map(t => (
         <button key={t} className="btn ghost" onClick={() => pickType(t)} style={{ flex: 1, padding: "8px 6px", fontSize: 12, borderColor: f.type === t ? OTYPE[t].color : C.line, color: f.type === t ? OTYPE[t].color : C.muted }}>{OTYPE[t].short}</button>
       ))}</div>
-      {f.type === "regulated" && (
-        <div className="foot" style={{ marginTop: -4 }}>
-          You're marking this yourself — we don't verify it. Check{" "}
-          <a href="https://www.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>RBI's list of registered lenders</a>{" "}
-          before relying on this. <a href="https://www.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>How to check →</a>
-        </div>
-      )}
       <div className="row" style={{ gap: 8 }}>
         <input className="in num" type="number" placeholder="Outstanding" value={f.outstanding || ""} onChange={e => setF({ ...f, outstanding: +e.target.value })} style={{ flex: 1 }} />
         <input className="in num" type="number" placeholder="Monthly" value={f.monthly || ""} onChange={e => setF({ ...f, monthly: +e.target.value })} style={{ width: 90 }} />
@@ -1714,7 +1718,7 @@ function ObligForm({ onSave, onCancel }) {
           <button className="btn ghost" onClick={() => setF(s => ({ ...s, isCreditCard: !s.isCreditCard }))} style={{ padding: "6px 10px", fontSize: 11, borderColor: f.isCreditCard ? C.violet : C.line, color: f.isCreditCard ? C.violet : C.muted }}>{f.isCreditCard ? "✓ " : ""}Credit card</button>
         )}
       </div>
-      <div className="foot" style={{ marginTop: 2 }}>Optional — helps prove what this loan actually cost you, and gives an APR suggestion.</div>
+      <div className="foot" style={{ marginTop: 2 }}>Optional — shows what this loan really cost you, and suggests an APR.</div>
       <div className="row" style={{ gap: 8 }}>
         <div style={{ flex: 1 }}><span className="lbl">Loan started</span>
           <input className="in" type="date" value={f.startDate} onChange={e => setF({ ...f, startDate: e.target.value })} /></div>
@@ -1724,18 +1728,6 @@ function ObligForm({ onSave, onCancel }) {
           <input className="in num" type="number" placeholder="0" value={f.amountTaken || ""} onChange={e => setF({ ...f, amountTaken: +e.target.value })} /></div>
         <div style={{ flex: 1 }}><span className="lbl">Amount received</span>
           <input className="in num" type="number" placeholder="0" value={f.amountReceived || ""} onChange={e => setF({ ...f, amountReceived: +e.target.value })} /></div>
-      </div>
-      <div>
-        <span className="lbl">Lender contact / account ref (optional)</span>
-        <input className="in" placeholder="Phone, email, or account number" value={f.lenderContact} onChange={e => setF({ ...f, lenderContact: e.target.value })} />
-      </div>
-      <div>
-        <span className="lbl">Registered / legal name (optional)</span>
-        <input className="in" placeholder="Legal or NBFC name, if different from the app name" value={f.legalName} onChange={e => setF({ ...f, legalName: e.target.value })} />
-      </div>
-      <div>
-        <span className="lbl">Workplace contact (optional)</span>
-        <input className="in" placeholder="Name / number they contacted at your workplace" value={f.workplaceContact} onChange={e => setF({ ...f, workplaceContact: e.target.value })} />
       </div>
       <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
     </div>
@@ -1788,233 +1780,16 @@ function SettleForm({ accounts, outstanding, onSettle, onCancel }) {
   );
 }
 
-function IncidentForm({ onSave, onCancel, references = [], workplaceContact = "" }) {
-  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), channel: "Call", target: "Me", refName: "", agentName: "", recorded: false, notes: "" });
-  return (
-    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-      <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} />
-      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {CONTACT_CHANNELS.map(c => (
-          <button key={c} className="btn ghost" onClick={() => setF({ ...f, channel: c })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.channel === c ? C.primary : C.line, color: f.channel === c ? C.primary : C.muted }}>{c}</button>
-        ))}
-      </div>
-      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {CONTACT_TARGETS.map(t => (
-          <button key={t} className="btn ghost" onClick={() => setF({ ...f, target: t, refName: "" })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.target === t ? C.coral : C.line, color: f.target === t ? C.coral : C.muted }}>{t}</button>
-        ))}
-      </div>
-      {f.target === "Reference" && references.length > 0 && (
-        <select className="in" value={f.refName} onChange={e => setF({ ...f, refName: e.target.value })}>
-          <option value="">Which reference? (optional)</option>
-          {references.map(r => <option key={r.id} value={r.name}>{r.name}{r.relation ? ` (${r.relation})` : ""}</option>)}
-        </select>
-      )}
-      {f.target === "Workplace" && workplaceContact && (
-        <div className="foot">Workplace contact on file: {workplaceContact}</div>
-      )}
-      <input className="in" placeholder="Caller / agent name (optional)" value={f.agentName} onChange={e => setF({ ...f, agentName: e.target.value })} />
-      <button className="btn ghost" onClick={() => setF({ ...f, recorded: !f.recorded })} style={{ borderColor: f.recorded ? C.teal : C.line, color: f.recorded ? C.teal : C.muted }}>{f.recorded ? "✓ " : ""}Have a recording of this</button>
-      <input className="in" placeholder="Notes — what happened, what was said" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
-        <button className="btn" onClick={() => onSave(f)} style={{ flex: 1 }}>Log it</button>
-      </div>
-    </div>
-  );
-}
-function ComplaintForm({ onSave, onCancel }) {
-  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), filedWith: COMPLAINT_TARGETS[0], refNumber: "", status: "Filed", notes: "" });
-  return (
-    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-      <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} />
-      <select className="in" value={f.filedWith} onChange={e => setF({ ...f, filedWith: e.target.value })}>
-        {COMPLAINT_TARGETS.map(x => <option key={x} value={x}>{x}</option>)}
-      </select>
-      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {COMPLAINT_STATUSES.map(s => (
-          <button key={s} className="btn ghost" onClick={() => setF({ ...f, status: s })} style={{ padding: "5px 8px", fontSize: 11, borderColor: f.status === s ? C.primary : C.line, color: f.status === s ? C.primary : C.muted }}>{s}</button>
-        ))}
-      </div>
-      <input className="in" placeholder="Reference / complaint number (optional)" value={f.refNumber} onChange={e => setF({ ...f, refNumber: e.target.value })} />
-      <input className="in" placeholder="Notes" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
-        <button className="btn" onClick={() => onSave(f)} style={{ flex: 1 }}>Log it</button>
-      </div>
-    </div>
-  );
-}
-function SettlementForm({ onSave, onCancel }) {
-  const [f, setF] = useState({ date: new Date().toISOString().slice(0, 10), offeredAmount: "", accepted: false, notes: "" });
-  return (
-    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-      <div className="row" style={{ gap: 8 }}>
-        <input className="in" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} style={{ flex: 1 }} />
-        <input className="in num" type="number" placeholder="Offered amount" value={f.offeredAmount} onChange={e => setF({ ...f, offeredAmount: e.target.value })} style={{ flex: 1 }} />
-      </div>
-      <button className="btn ghost" onClick={() => setF({ ...f, accepted: !f.accepted })} style={{ borderColor: f.accepted ? C.teal : C.line, color: f.accepted ? C.teal : C.muted }}>{f.accepted ? "✓ " : ""}Accepted</button>
-      <input className="in" placeholder="Notes" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} />
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
-        <button className="btn" disabled={!f.offeredAmount} onClick={() => onSave({ ...f, offeredAmount: +f.offeredAmount })} style={{ flex: 1, opacity: f.offeredAmount ? 1 : 0.5 }}>Log it</button>
-      </div>
-    </div>
-  );
-}
-
-function ReferenceForm({ onSave, onCancel }) {
-  const [f, setF] = useState({ name: "", phone: "", relation: "" });
-  return (
-    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-      <input className="in" placeholder="Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
-      <div className="row" style={{ gap: 8 }}>
-        <input className="in" placeholder="Phone number" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} style={{ flex: 1 }} />
-        <input className="in" placeholder="Relation (e.g. sister)" value={f.relation} onChange={e => setF({ ...f, relation: e.target.value })} style={{ flex: 1 }} />
-      </div>
-      <div className="row" style={{ gap: 8 }}>
-        <button className="btn ghost" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
-        <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ flex: 1, opacity: f.name ? 1 : 0.5 }}>Add reference</button>
-      </div>
-    </div>
-  );
-}
-
-function EscalationHelper() {
-  const [active, setActive] = useState(null);
-  const situation = ESCALATION_SITUATIONS.find(s => s.key === active);
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      <div style={{ fontSize: 13, color: C.muted }}>Tap what's actually happening right now — each one walks through exactly what to do next.</div>
-      <div style={{ display: "grid", gap: 8 }}>
-        {ESCALATION_SITUATIONS.map(s => {
-          const I = s.icon;
-          return (
-            <button key={s.key} onClick={() => setActive(active === s.key ? null : s.key)} className="btn ghost"
-              style={{ justifyContent: "flex-start", gap: 10, padding: "12px 14px", borderColor: active === s.key ? C.primary : C.line, color: active === s.key ? C.primary : C.text }}>
-              <I size={16} /> {s.label}
-            </button>
-          );
-        })}
-      </div>
-      {situation && (
-        <div className="card" style={{ background: C.surface2, display: "grid", gap: 10 }}>
-          {situation.steps.map((step, i) => (
-            <div key={i} className="row" style={{ gap: 8, alignItems: "flex-start" }}>
-              <span className="chip" style={{ background: C.primary, color: "#fff", width: 18, height: 18, minWidth: 18, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, marginTop: 2 }}>{i + 1}</span>
-              <span style={{ fontSize: 13, lineHeight: 1.5 }}>{step}</span>
-            </div>
-          ))}
-          {situation.links && situation.links.length > 0 && (
-            <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 2 }}>
-              {situation.links.map(l => (
-                <a key={l.href} href={l.href} target={l.href.startsWith("tel:") ? undefined : "_blank"} rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-                  <span className="chip" style={{ background: C.primary, color: "#fff", cursor: "pointer" }}>{l.label} →</span>
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-      <div className="foot">General guidance, not legal advice — for anything that turns into an actual notice or case, get it checked by someone qualified. NALSA free legal aid is a good first stop before paying anyone.</div>
-      <div className="foot">"Marked Regulated" tags are set by you, not verified by us. If a lender's status affects what you do next — especially escalation — confirm it directly with RBI's registry first.</div>
-    </div>
-  );
-}
-
-function Support() {
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <div className="card" style={{ border: "1px solid " + C.primary }}>
-        <div className="row" style={{ gap: 8, marginBottom: 10 }}>
-          <ShieldCheck size={16} color={C.primary} />
-          <span style={{ fontWeight: 600 }}>Escalation Helper</span>
-        </div>
-        <EscalationHelper />
-      </div>
-
-      <div className="card">
-        <div className="row" style={{ gap: 8, marginBottom: 6 }}>
-          <Phone size={16} color={C.coral} />
-          <span style={{ fontWeight: 600 }}>If the calls feel like too much</span>
-        </div>
-        <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>Lenders and their recovery agents have to follow RBI rules. A lot of what feels normal from these apps isn't actually allowed.</div>
-        <div style={{ fontSize: 13, display: "grid", gap: 6, marginBottom: 12 }}>
-          <div>• They can only call you between 8am and 7pm.</div>
-          <div>• No threats, abuse, or calling your family or employer to shame you.</div>
-          <div>• They can't access your contacts, photos, or location without your consent.</div>
-          <div>• A woman borrower can only be contacted by a female agent, within set hours.</div>
-        </div>
-        <div className="foot" style={{ marginBottom: 10 }}>
-          Getting nowhere with the lender directly? Write to their Grievance / Nodal Officer first (they get 30 days). Still stuck — file a free complaint at{" "}
-          <a href="https://cms.rbi.org.in/" target="_blank" rel="noopener noreferrer" style={{ color: C.primary, fontWeight: 600 }}>cms.rbi.org.in</a>{" "}
-          under the RBI Ombudsman Scheme. No lawyer, no fee, and it covers digital lending.
-        </div>
-        <div style={{ fontSize: 13, background: C.surface2, borderRadius: 10, padding: 10, marginBottom: 10 }}>
-          If it crosses into threats, blackmail, or morphed photos — that's a crime, not a lending dispute, not something to handle alone.
-        </div>
-        <a href="https://cybercrime.gov.in/" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 8, border: "1px solid " + C.line }}>
-            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>National Cyber Crime Reporting Portal</div><div style={{ fontSize: 12, color: C.muted }}>cybercrime.gov.in</div></div>
-            <span className="chip" style={{ background: C.coral, color: "#fff" }}>open</span>
-          </div>
-        </a>
-        <a href="tel:1930" style={{ textDecoration: "none" }}>
-          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", border: "1px solid " + C.line }}>
-            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>National Cyber Crime Helpline</div><div style={{ fontSize: 12, color: C.muted }}>24x7 · toll-free</div></div>
-            <div className="num" style={{ fontWeight: 700, color: C.coral }}>1930</div>
-          </div>
-        </a>
-      </div>
-
-      <div className="card" style={{ background: C.surface2 }}>
-        <div className="row" style={{ gap: 8, marginBottom: 6 }}>
-          <Heart size={16} color={C.violet} />
-          <span style={{ fontWeight: 600 }}>Feeling overwhelmed by all this?</span>
-        </div>
-        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>Debt stress is heavy, and it's common to feel it more than the numbers suggest. These lines are free, confidential, and run by trained counsellors — not lenders, not collectors. Calling doesn't cost anything and nothing is reported anywhere.</div>
-        <a href="tel:18005990019" style={{ textDecoration: "none" }}>
-          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 8, border: "1px solid " + C.line }}>
-            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>KIRAN Mental Health Helpline</div><div style={{ fontSize: 12, color: C.muted }}>24x7 · toll-free · 13 languages</div></div>
-            <div className="num" style={{ fontWeight: 700, color: C.teal }}>1800-599-0019</div>
-          </div>
-        </a>
-        <a href="tel:14416" style={{ textDecoration: "none" }}>
-          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", border: "1px solid " + C.line }}>
-            <div><div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>Tele MANAS</div><div style={{ fontSize: 12, color: C.muted }}>24x7 counselling · Govt of India</div></div>
-            <div className="num" style={{ fontWeight: 700, color: C.teal }}>14416</div>
-          </div>
-        </a>
-        <div className="foot" style={{ marginTop: 10 }}>If it ever feels like more than you can carry, please call one of these. That's exactly what they're there for.</div>
-      </div>
-
-      <div className="card">
-        <div className="row" style={{ gap: 8, marginBottom: 6 }}>
-          <MessageCircle size={16} color={C.amber} />
-          <span style={{ fontWeight: 600 }}>You're not the only one dealing with this</span>
-        </div>
-        <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>Plenty of people have clawed their way out of the exact same spot — payday apps, credit cards, family loans, all of it. It can help to read how others did it.</div>
-        <a href="https://www.reddit.com/r/IndiaInvestments/" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
-          <div className="row" style={{ justifyContent: "space-between", background: "#fff", borderRadius: 12, padding: "12px 14px", border: "1px solid " + C.line }}>
-            <div style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>r/IndiaInvestments</div>
-            <span className="chip" style={{ background: C.line, color: C.muted }}>open</span>
-          </div>
-        </a>
-        <div className="foot" style={{ marginTop: 8 }}>Search "debt free" or "payday loan" in there — r/CreditCardsIndia and r/personalfinanceindia are worth a look too. You don't have to post anything; reading is enough to start.</div>
-      </div>
-    </div>
-  );
-}
-
 function Activity({ expenses, payments, incomes, oblig, accounts }) {
   const [payPeriod, setPayPeriod] = useState("month");
   const nameOf = (id, list) => (list.find((x) => x.id === id) || {}).name || "";
   const items = [
-    ...(incomes || []).map((i) => ({ date: i.date, dir: "in", amount: +i.amount || 0, label: "Income" + (nameOf(i.accountId, accounts) ? " → " + nameOf(i.accountId, accounts) : "") })),
+    ...(incomes || []).map((i) => ({ date: i.date, dir: "in", amount: +i.amount || 0, label: "Income · " + incomeSourceLabel(i) + (i.note ? " — " + i.note : "") + (nameOf(i.accountId, accounts) ? " → " + nameOf(i.accountId, accounts) : "") })),
     ...(expenses || []).map((e) => ({ date: e.date, dir: "out", amount: +e.amount || 0, label: e.cat || "Spending" })),
     ...(payments || []).map((p) => ({ date: p.date, dir: "out", amount: +p.amount || 0, label: "Paid " + (nameOf(p.obligId, oblig) || "a debt") })),
   ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 
-  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthKey = localMonth();
   const inM = items.filter((i) => i.dir === "in" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
   const outM = items.filter((i) => i.dir === "out" && i.date.slice(0, 7) === monthKey).reduce((s, i) => s + i.amount, 0);
 
