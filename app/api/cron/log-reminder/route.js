@@ -2,9 +2,11 @@ import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
-// Runs daily at 15:00 UTC (8:30pm IST) — see vercel.json. Emails anyone who turned on the Money Log
-// reminder and hasn't shared/saved a daily log for today (India time). Uses the same Resend setup
-// as the payment reminders.
+// Runs daily at 15:00 UTC (8:30pm IST) — see vercel.json. Two jobs (Vercel's free plan allows only
+// two scheduled jobs, so they share this one):
+//  1. Money Log reminder for anyone who turned it on and hasn't shared/saved today's log.
+//  2. On the 1st of each month, emails a full backup file (unless turned off in Settings).
+// Uses the same Resend setup as the payment reminders.
 export async function GET(request) {
   const auth = request.headers.get("authorization");
   if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -17,8 +19,26 @@ export async function GET(request) {
   const todayIST = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
   const appUrl = process.env.APP_URL || new URL(request.url).origin;
   let emailsSent = 0;
+  const isFirst = todayIST.slice(8, 10) === "01";
+  let backupsSent = 0;
   for (const row of rows || []) {
     const settings = (row.data && row.data.settings) || {};
+    if (isFirst && settings.backupEmail !== false) {
+      const { data: bprof } = await admin.from("profiles").select("email").eq("id", row.user_id).maybeSingle();
+      if (bprof && bprof.email) {
+        const json = JSON.stringify({ app: "clearing", v: 1, savedAt: new Date().toISOString(), ...row.data }, null, 2);
+        const r = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            from: process.env.REMINDER_FROM, to: bprof.email, subject: `Clearing backup — ${todayIST.slice(0, 7)}`,
+            html: `<div style="font-family:system-ui,sans-serif;max-width:420px;"><h2 style="color:#1F4D46;">Your monthly backup</h2><p style="color:#5F6B6E;font-size:14px;">Everything in Clearing as of today is attached. Keep this email — if anything ever goes wrong, open Settings → Restore in the app and pick this file.</p></div>`,
+            attachments: [{ filename: `clearing-backup-${todayIST}.json`, content: Buffer.from(json).toString("base64") }],
+          }),
+        });
+        if (r.ok) backupsSent++;
+      }
+    }
     if (!settings.logReminder) continue;
     const posts = settings.logPosts || {};
     if (posts[todayIST]) continue;
@@ -42,5 +62,5 @@ export async function GET(request) {
     });
     if (res.ok) emailsSent++;
   }
-  return Response.json({ ok: true, emailsSent });
+  return Response.json({ ok: true, emailsSent, backupsSent });
 }

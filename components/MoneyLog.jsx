@@ -51,13 +51,14 @@ export function quoteFor(dateStr, custom = []) {
 export function buildSnapshot({ date, expenses, payments, incomes, oblig, sourceLabel, budget = 0, includeLoans = true, showIncome = true }) {
   if (!includeLoans) payments = [];
   const month = date.slice(0, 7);
+  const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
   const debtName = (id) => ((oblig || []).find(o => o.id === id) || {}).name || "a debt";
   const todayItems = [
     ...(expenses || []).filter(e => e.date === date).map(e => ({ label: e.cat || "Spending", note: e.note || "", amount: +e.amount || 0, cat: e.cat })),
-    ...(payments || []).filter(p => p.date === date).map(p => ({ label: "Paid " + debtName(p.obligId), note: "", amount: +p.amount || 0, cat: "Loan repayments" })),
+    ...(payments || []).filter(p => p.date === date && net(p) > 0).map(p => ({ label: "Paid " + debtName(p.obligId).trim(), note: "", amount: net(p), cat: "Loan repayments" })),
   ].sort((a, b) => b.amount - a.amount);
   const monthExp = (expenses || []).filter(e => (e.date || "").slice(0, 7) === month && e.date <= date);
-  const monthPaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === month && p.date <= date).reduce((s, p) => s + (+p.amount || 0), 0);
+  const monthPaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === month && p.date <= date).reduce((s, p) => s + net(p), 0);
   const byCat = {};
   monthExp.forEach(e => { const c = e.cat || "Other"; byCat[c] = (byCat[c] || 0) + (+e.amount || 0); });
   if (monthPaid > 0) byCat["Loan repayments"] = monthPaid;
@@ -132,26 +133,38 @@ function wrapLines(ctx, str, maxW, maxLines) {
   return lines;
 }
 // Paper-clipped box with the quote of the day (up to two lines) and its author.
-function quoteBox(ctx, L, R, by, bh, quote) {
-  const q = (quote && quote.q) || "", a = (quote && quote.a) || "";
+// Fits the whole quote: tries a large size first, then smaller sizes, up to 5 lines — never cuts it off.
+function measureQuote(ctx, quote, L, R) {
+  const q = "“" + (((quote && quote.q) || "").trim()) + "”", a = ((quote && quote.a) || "").trim();
+  const maxW = R - L - 150;
+  let size = 38, lines;
+  for (; size >= 26; size -= 2) {
+    ctx.font = f(size);
+    lines = wrapLines(ctx, q, maxW, 99);
+    if (lines.length <= (size >= 34 ? 3 : 5)) break;
+  }
+  if (size < 26) { size = 26; ctx.font = f(size); lines = wrapLines(ctx, q, maxW, 99); }
+  const lineH = size * 1.22;
+  const h = Math.max(130, 64 + lines.length * lineH + (a ? 40 : 0));
+  return { size, lines, lineH, a, h };
+}
+function quoteBox(ctx, L, R, by, m) {
+  const bh = m.h;
   ctx.save(); ctx.strokeStyle = INK; ctx.lineWidth = 4; roundRect(ctx, L - 10, by, R - L + 20, bh, 26); ctx.stroke(); ctx.restore();
   dashedBox(ctx, L + 6, by + 14, R - L - 12, bh - 28, "#E2B84A", [12, 9]);
   ctx.save(); ctx.strokeStyle = "#6B6B6B"; ctx.lineWidth = 5; ctx.lineCap = "round";
   ctx.beginPath(); ctx.moveTo(L + 10, by + 50); ctx.lineTo(L + 10, by - 6); ctx.arc(L + 26, by - 6, 16, Math.PI, 0); ctx.lineTo(L + 42, by + 44); ctx.arc(L + 32, by + 44, 10, 0, Math.PI); ctx.lineTo(L + 22, by + 4); ctx.stroke(); ctx.restore();
-  let size = 38; ctx.font = f(size);
-  let lines = wrapLines(ctx, "“" + q + "”", R - L - 170, 2);
-  if (lines.length === 2 && lines[1].endsWith("…")) { size = 33; ctx.font = f(size); lines = wrapLines(ctx, "“" + q + "”", R - L - 170, 2); }
-  const lineH = size * 1.2, blockH = lines.length * lineH + (a ? 40 : 0);
-  let y = by + bh / 2 - blockH / 2 + size * 0.85;
-  lines.forEach(l => { text(ctx, l, (L + R) / 2, y, { size, align: "center" }); y += lineH; });
-  if (a) text(ctx, "— " + a, (L + R) / 2, y + 2, { size: 30, align: "center", color: "#C0504A" });
-  ctx.save(); ctx.translate(R - 50, by + bh - 40); ctx.fillStyle = "#F2A0B4"; ctx.strokeStyle = "#C9607C"; ctx.lineWidth = 3;
+  const blockH = m.lines.length * m.lineH + (m.a ? 40 : 0);
+  let y = by + bh / 2 - blockH / 2 + m.size * 0.85;
+  m.lines.forEach(l => { text(ctx, l, (L + R) / 2, y, { size: m.size, align: "center" }); y += m.lineH; });
+  if (m.a) text(ctx, "— " + m.a, (L + R) / 2, y + 2, { size: 30, align: "center", color: "#C0504A" });
+  ctx.save(); ctx.translate(R - 46, by + bh - 36); ctx.scale(0.85, 0.85); ctx.fillStyle = "#F2A0B4"; ctx.strokeStyle = "#C9607C"; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(0, 18); ctx.bezierCurveTo(-40, -10, -22, -40, 0, -20); ctx.bezierCurveTo(22, -40, 40, -10, 0, 18); ctx.fill(); ctx.stroke(); ctx.restore();
 }
-function header(ctx, L, R, title, sub) {
+function header(ctx, L, R, title, sub, top = 250) {
   let ts = 96; ctx.font = f(ts, 700);
   while (ctx.measureText(title).width > R - L - 140 && ts > 60) { ts -= 4; ctx.font = f(ts, 700); }
-  const ty = 250 + 90;
+  const ty = top + 90;
   text(ctx, title, (L + R) / 2, ty, { size: ts, weight: 700, align: "center" });
   const tw = ctx.measureText(title).width;
   sparks(ctx, (L + R) / 2, ty - 30, tw / 2 + 24, INK);
@@ -205,91 +218,84 @@ export function drawMoneyLog(canvas, snap, { dayNumber, quote, hide = false, tit
   const monthLabel = d.toLocaleDateString("en-IN", { month: "long", year: "numeric" }).toUpperCase();
   const dayStr = String(dayNumber).padStart(2, "0");
 
-  // Instagram covers roughly the top and bottom 250px of a story with its own UI (profile bar,
-  // reply field), so everything that matters sits between SAFE_TOP and SAFE_BOTTOM.
-  const SAFE_TOP = 250, SAFE_BOTTOM = H - 250;
+  // Instagram's profile bar covers roughly the top ~200px of a story and the reply field the
+  // bottom ~250px, so everything that matters sits between SAFE_TOP and SAFE_BOTTOM. The layout
+  // flows: header and totals at the top, the quote (sized to fit in full) at the bottom, and the
+  // day's entries get whatever room is left — shrinking, then splitting into two columns, so every
+  // entry shows no matter how many there are.
+  const SAFE_TOP = 190, SAFE_BOTTOM = H - 250;
+  const ty = header(ctx, L, R, title, `${dateLabel}  ·  Day ${dayStr}`, SAFE_TOP);
 
-  const ty = header(ctx, L, R, title, `${dateLabel}  ·  Day ${dayStr}`);
+  // Totals
+  const colW = (R - L - 40) / 2, r1 = ty + 168, Rx = L + colW + 40;
+  highlight(ctx, "MONTHLY SPEND", L + 10, r1, "#F4A6A6", { size: 40 });
+  highlight(ctx, "TODAY'S SPEND", Rx + 10, r1, "#A9C8EE", { size: 40 });
+  text(ctx, `( ${monthLabel} )`, L + 10, r1 + 44, { size: 28, color: INK_SOFT });
+  text(ctx, snap.todayItems.length ? `${snap.todayItems.length} ${snap.todayItems.length === 1 ? "entry" : "entries"}` : "no-spend day ✨", Rx + 10, r1 + 44, { size: 28, color: INK_SOFT });
+  dashedBox(ctx, L, r1 + 64, colW, 132, "#D86A6A");
+  dashedBox(ctx, Rx, r1 + 64, colW, 132, "#6D95CF");
+  text(ctx, "TOTAL SPENT SO FAR", L + colW / 2, r1 + 106, { size: 28, align: "center", color: INK_SOFT });
+  text(ctx, "SPENT TODAY", Rx + colW / 2, r1 + 106, { size: 28, align: "center", color: INK_SOFT });
+  text(ctx, money(snap.monthTotal), L + colW / 2, r1 + 176, { size: 68, weight: 700, align: "center", maxW: colW - 30 });
+  text(ctx, money(snap.todayTotal), Rx + colW / 2, r1 + 176, { size: 68, weight: 700, align: "center", maxW: colW - 30 });
 
-  // Row 1: month total | today total
-  const colW = (R - L - 40) / 2, r1 = ty + 186;
-  highlight(ctx, "MONTHLY SPEND", L + 10, r1, "#F4A6A6", { size: 42 });
-  text(ctx, `( ${monthLabel} )`, L + 10, r1 + 48, { size: 30, color: INK_SOFT });
-  dashedBox(ctx, L, r1 + 70, colW, 150, "#D86A6A");
-  text(ctx, "TOTAL SPENT SO FAR", L + colW / 2, r1 + 118, { size: 30, align: "center", color: INK_SOFT });
-  text(ctx, money(snap.monthTotal), L + colW / 2, r1 + 195, { size: 72, weight: 700, align: "center", maxW: colW - 30 });
+  // Bottom-up: quote, then the one-line extra (came in / budget), then the chart.
+  const qm = measureQuote(ctx, quote, L, R);
+  const quoteTop = SAFE_BOTTOM - qm.h;
+  const hasExtra = snap.sources.length > 0 || snap.budget > 0;
+  const extraY = quoteTop - (hasExtra ? 62 : 0);
+  let pieH = snap.slices.length ? 300 : 0;
 
-  const Rx = L + colW + 40;
-  highlight(ctx, "TODAY'S SPEND", Rx + 10, r1, "#A9C8EE", { size: 42 });
-  text(ctx, snap.todayItems.length ? `${snap.todayItems.length} ${snap.todayItems.length === 1 ? "entry" : "entries"}` : "no-spend day ✨", Rx + 10, r1 + 48, { size: 30, color: INK_SOFT });
-  dashedBox(ctx, Rx, r1 + 70, colW, 150, "#6D95CF");
-  text(ctx, "SPENT TODAY", Rx + colW / 2, r1 + 118, { size: 30, align: "center", color: INK_SOFT });
-  text(ctx, money(snap.todayTotal), Rx + colW / 2, r1 + 195, { size: 72, weight: 700, align: "center", maxW: colW - 30 });
-
-  // Today's list
-  let y = r1 + 285;
-  text(ctx, "WHAT", L, y, { size: 28, weight: 700, color: INK_SOFT });
-  text(ctx, "AMOUNT (₹)", R, y, { size: 28, weight: 700, color: INK_SOFT, align: "right" });
-  ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(L, y + 16); ctx.lineTo(R, y + 16); ctx.stroke();
-  const maxRows = 3;
-  const rows = snap.todayItems.slice(0, maxRows);
-  y += 70;
-  if (!rows.length) { text(ctx, "Nothing spent today — that counts too.", L + 10, y, { size: 36, color: INK_SOFT }); dottedRule(ctx, L, R, y + 20); }
-  rows.forEach((it, i) => {
-    const extra = i === maxRows - 1 && snap.todayItems.length > maxRows ? snap.todayItems.length - maxRows + 1 : 0;
-    if (extra) {
-      const rest = snap.todayItems.slice(maxRows - 1).reduce((s, x) => s + x.amount, 0);
-      text(ctx, `🧾  + ${extra} more`, L + 6, y, { size: 36 });
-      text(ctx, plain(rest), R, y, { size: 38, weight: 700, align: "right" });
-    } else {
-      text(ctx, `${emojiFor(it.cat || it.label)}  ${it.label}${it.note ? " · " + it.note : ""}`, L + 6, y, { size: 36, maxW: R - L - 200 });
-      text(ctx, plain(it.amount), R, y, { size: 38, weight: 700, align: "right" });
-    }
-    dottedRule(ctx, L, R, y + 20); y += 58;
+  // Entries
+  const listTop = r1 + 262;
+  const rowsFor = (pie) => (extraY - (hasExtra ? 40 : 10) - pie - (pie ? 24 : 0)) - (listTop + 50);
+  const n = Math.max(1, snap.todayItems.length);
+  let avail = rowsFor(pieH), cols = 1, rowH = Math.min(58, avail / n);
+  if (rowH < 36) { cols = 2; rowH = Math.min(58, avail / Math.ceil(n / 2)); }
+  if (rowH < 32 && pieH) { pieH = 0; avail = rowsFor(0); cols = 1; rowH = Math.min(58, avail / n); if (rowH < 36) { cols = 2; rowH = avail / Math.ceil(n / 2); } }
+  const fs = Math.max(20, Math.min(36, Math.round(rowH * 0.62)));
+  text(ctx, "WHAT", L, listTop, { size: 26, weight: 700, color: INK_SOFT });
+  text(ctx, "AMOUNT (₹)", R, listTop, { size: 26, weight: 700, color: INK_SOFT, align: "right" });
+  ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(L, listTop + 14); ctx.lineTo(R, listTop + 14); ctx.stroke();
+  let y0 = listTop + 14 + rowH * 0.78 + 6;
+  if (!snap.todayItems.length) { text(ctx, "Nothing spent today — that counts too.", L + 10, y0 + 8, { size: 34, color: INK_SOFT }); }
+  const perCol = cols === 2 ? Math.ceil(snap.todayItems.length / 2) : snap.todayItems.length;
+  const cw = cols === 2 ? (R - L - 30) / 2 : R - L;
+  snap.todayItems.forEach((it, i) => {
+    const c = Math.floor(i / perCol), r = i % perCol;
+    const x0 = L + c * (cw + 30), x1 = x0 + cw, y = y0 + r * rowH;
+    const amt = plain(it.amount);
+    ctx.font = f(fs + 2, 700); const aw = ctx.measureText(amt).width;
+    text(ctx, `${emojiFor(it.cat || it.label)} ${it.label}${it.note && cols === 1 ? " · " + it.note : ""}`, x0 + 4, y, { size: fs, maxW: cw - aw - 24 });
+    text(ctx, amt, x1, y, { size: fs + 2, weight: 700, align: "right" });
+    dottedRule(ctx, x0, x1, y + Math.min(18, rowH * 0.3));
   });
 
   // Where the money is going
-  y = r1 + 555;
-  highlight(ctx, "WHERE MY MONEY IS GOING", (L + R) / 2, y, "#BFD98A", { size: 42, align: "center" });
-  const cy = y + 160, cx = L + 140;
-  donut(ctx, cx, cy, 125, snap.slices);
-  text(ctx, "THIS", cx, cy - 6, { size: 26, align: "center", color: INK_SOFT });
-  text(ctx, "MONTH", cx, cy + 24, { size: 26, align: "center", color: INK_SOFT });
-  const lx = L + 320;
-  const legend = snap.slices.slice(0, 6);
-  const lh = legend.length > 4 ? 44 : 54;
-  let ly = cy - (legend.length - 1) * lh / 2 + 12;
-  if (!legend.length) text(ctx, "No spends logged yet this month.", lx, cy, { size: 32, color: INK_SOFT });
-  legend.forEach((s, i) => {
-    ctx.fillStyle = SLICE_COLORS[i % SLICE_COLORS.length]; ctx.beginPath(); ctx.arc(lx + 14, ly - 12, 13, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#3A3A3A"; ctx.lineWidth = 2; ctx.stroke();
-    text(ctx, s.label, lx + 42, ly, { size: 34, maxW: R - lx - 140 });
-    const pct = (s.value / snap.monthTotal) * 100;
-    text(ctx, (pct > 0 && pct < 1 ? "<1" : Math.round(pct)) + "%", R, ly, { size: 34, weight: 700, align: "right" });
-    ly += lh;
-  });
+  if (pieH) {
+    const hy = extraY - (hasExtra ? 40 : 10) - pieH + 30;
+    highlight(ctx, "WHERE MY MONEY IS GOING", (L + R) / 2, hy, "#BFD98A", { size: 40, align: "center" });
+    const cy = hy + 145, cx = L + 125;
+    donut(ctx, cx, cy, 110, snap.slices);
+    text(ctx, "THIS", cx, cy - 6, { size: 24, align: "center", color: INK_SOFT });
+    text(ctx, "MONTH", cx, cy + 22, { size: 24, align: "center", color: INK_SOFT });
+    legendList(ctx, L + 290, R, cy, snap.slices.slice(0, 5), snap.monthTotal);
+  }
 
-  // One bottom line: money that came in today if any, otherwise budget left (if a budget is set).
-  y = cy + 190;
+  // One line: money that came in today if any, otherwise budget left (if a budget is set).
   if (snap.sources.length) {
-    highlight(ctx, "CAME IN TODAY", L + 10, y, "#F7D774", { size: 40 });
+    highlight(ctx, "CAME IN TODAY", L + 10, extraY, "#F7D774", { size: 38 });
     const label = snap.sources.map(s => HIDE ? s.label : `${s.label} ${inr(s.value)}`).join("  ·  ");
-    text(ctx, label, R, y, { size: 32, weight: 700, align: "right", maxW: R - L - 400 });
+    text(ctx, label, R, extraY, { size: 30, weight: 700, align: "right", maxW: R - L - 380 });
   } else if (snap.budget > 0) {
     const left = snap.budgetLeft;
     const usedPct = Math.round(((snap.budget - left) / snap.budget) * 100);
-    highlight(ctx, HIDE ? "BUDGET USED THIS MONTH" : left >= 0 ? "BUDGET LEFT THIS MONTH" : "OVER BUDGET BY", L + 10, y, left >= 0 ? "#F7D774" : "#F4A6A6", { size: 40 });
-    text(ctx, HIDE ? usedPct + "%" : inr(Math.abs(left)), R, y, { size: 44, weight: 700, align: "right" });
-    const bw = R - L, used = Math.min(1, Math.max(0, (snap.budget - left) / snap.budget));
-    ctx.save(); roundRect(ctx, L, y + 26, bw, 18, 9); ctx.fillStyle = "#EFE6CF"; ctx.fill();
-    roundRect(ctx, L, y + 26, Math.max(18, bw * used), 18, 9); ctx.fillStyle = left >= 0 ? "#F0923A" : "#E5534B"; ctx.fill(); ctx.restore();
+    highlight(ctx, HIDE ? "BUDGET USED THIS MONTH" : left >= 0 ? "BUDGET LEFT THIS MONTH" : "OVER BUDGET BY", L + 10, extraY, left >= 0 ? "#F7D774" : "#F4A6A6", { size: 38 });
+    text(ctx, HIDE ? usedPct + "%" : inr(Math.abs(left)), R, extraY, { size: 42, weight: 700, align: "right" });
   }
 
-  quoteBox(ctx, L, R, SAFE_BOTTOM - 165, 165, quote);
-
-  // Footer sits in the zone Instagram may cover — decorative only (Day N is also in the header).
-  const fy = H - 150;
-  footer(ctx, L, R, fy, `DAY ${dayStr} / ∞`);
+  quoteBox(ctx, L, R, quoteTop, qm);
+  footer(ctx, L, R, H - 150, `DAY ${dayStr} / ∞`);
 }
 
 // ---------- monthly wrap-up ----------
@@ -297,7 +303,7 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   const inMonth = (x) => (x.date || "").slice(0, 7) === month;
   const exp = (expenses || []).filter(inMonth);
   const pays = (payments || []).filter(inMonth);
-  const loansPaid = pays.reduce((s, p) => s + (+p.amount || 0), 0);
+  const loansPaid = pays.reduce((s, p) => s + (+p.amount || 0) - (+p.coversSpends || 0), 0);
   const byCat = {};
   exp.forEach(e => { const c = e.cat || "Other"; byCat[c] = (byCat[c] || 0) + (+e.amount || 0); });
   if (includeLoans && loansPaid > 0) byCat["Loan repayments"] = loansPaid;
@@ -311,7 +317,7 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   const [y, m] = month.split("-").map(Number);
   const prev = `${m === 1 ? y - 1 : y}-${String(m === 1 ? 12 : m - 1).padStart(2, "0")}`;
   const prevOut = (expenses || []).filter(e => (e.date || "").slice(0, 7) === prev).reduce((s, e) => s + (+e.amount || 0), 0)
-    + (includeLoans ? (payments || []).filter(p => (p.date || "").slice(0, 7) === prev).reduce((s, p) => s + (+p.amount || 0), 0) : 0);
+    + (includeLoans ? (payments || []).filter(p => (p.date || "").slice(0, 7) === prev).reduce((s, p) => s + (+p.amount || 0) - (+p.coversSpends || 0), 0) : 0);
   // No-spend days: days so far this month (or the whole month, if it's over) with no everyday spend logged.
   const daysInMonth = new Date(y, m, 0).getDate();
   const lastDay = today.slice(0, 7) === month ? +today.slice(8, 10) : daysInMonth;
@@ -334,7 +340,7 @@ export function drawMonthWrap(canvas, wrap, { quote, hide = false }) {
   const L = 150, R = W - 70, SAFE_BOTTOM = H - 250;
   const d = new Date(wrap.month + "-01T00:00:00");
   const monthName = d.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
-  const ty = header(ctx, L, R, "MONTH IN REVIEW", wrap.complete ? monthName : `${monthName} · so far (${wrap.daysSoFar} days)`);
+  const ty = header(ctx, L, R, "MONTH IN REVIEW", wrap.complete ? monthName : `${monthName} · so far (${wrap.daysSoFar} days)`, 190);
 
   // Money out | money in
   const colW = (R - L - 40) / 2, r1 = ty + 186, Rx = L + colW + 40;
@@ -379,7 +385,8 @@ export function drawMonthWrap(canvas, wrap, { quote, hide = false }) {
     dottedRule(ctx, L, R, y + 16); y += 50;
   });
 
-  quoteBox(ctx, L, R, SAFE_BOTTOM - 165, 165, quote);
+  const qm = measureQuote(ctx, quote, L, R);
+  quoteBox(ctx, L, R, SAFE_BOTTOM - qm.h, qm);
   const fy = H - 150;
   footer(ctx, L, R, fy, d.toLocaleDateString("en-IN", { month: "short" }).toUpperCase() + " · WRAPPED");
 }
