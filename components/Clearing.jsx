@@ -744,6 +744,7 @@ export default function Clearing({ userId }) {
           onAddQuote={(q) => setSettings(s => ({ ...s, quotes: [...(s.quotes || []), q] }))}
           onPosted={(d, rec) => setSettings(s => ({ ...s, logPosts: { ...(s.logPosts || {}), [d]: rec } }))}
           reminder={settings.logReminder} onReminder={(on) => setSettings(s => ({ ...s, logReminder: on }))}
+          privateDefault={settings.logPrivate2 ?? false} onPrivateChange={(v) => setSettings(s => ({ ...s, logPrivate2: v }))}
           onClose={() => setLogDate(null)} />
       )}
       <div className="tabbar">
@@ -1635,6 +1636,7 @@ function Pill({ on, onClick, children, color = C.primary }) {
    ================================================================================================ */
 function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }) {
   const [period, setPeriod] = useState("month");
+  const [withRepay, setWithRepay] = useState(false);
   const [filter, setFilter] = useState("all"); // all | spent | repay | in
   const [catFilter, setCatFilter] = useState(null);
   const [days, setDays] = useState(7);
@@ -1652,7 +1654,9 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
   const monthRepaid = sum(payments.filter(p => inMonth(p, monthKey)), netPaid);
   const monthIn = sum(incomes.filter(i => inMonth(i, monthKey)), i => i.amount);
   const monthOut = monthSpend + monthRepaid;
-  const lastSpend = sum(expenses.filter(e => inMonth(e, lastMonthKey)), e => e.amount);
+  // Compare like with like: this month so far vs the same days of last month.
+  const dayOfMonth = now.getDate();
+  const lastSpend = sum(expenses.filter(e => inMonth(e, lastMonthKey) && +(e.date || "").slice(8, 10) <= dayOfMonth), e => e.amount);
   const trend = lastSpend > 0 ? Math.round(((monthSpend - lastSpend) / lastSpend) * 100) : null;
   const budget = +settings.budget || 0;
 
@@ -1661,7 +1665,7 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
   const pPaid = sum(payments.filter(p => inPeriod(p.date, period)), netPaid);
   const byCat = [
     ...[...new Set(pExp.map(e => e.cat || "Other"))].map(c => ({ c, total: sum(pExp.filter(e => (e.cat || "Other") === c), e => e.amount) })),
-    ...(pPaid > 0 ? [{ c: "Loan repayments", total: pPaid, isLoan: true }] : []),
+    ...(withRepay && pPaid > 0 ? [{ c: "Loan repayments", total: pPaid, isLoan: true }] : []),
   ].filter(x => x.total > 0).sort((a, b) => b.total - a.total).map((x, i) => ({ ...x, color: x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length] }));
   const pTotal = sum(byCat, x => x.total);
 
@@ -1701,7 +1705,7 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
           <div style={{ width: (monthOut ? (monthRepaid / monthOut) * 100 : 50) + "%", background: C.violet }} />
         </div>
         <div className="row" style={{ justifyContent: "space-between", marginTop: 8, fontSize: 12.5 }}>
-          <span><span className="dot" style={{ background: C.amber }} />Everyday {inr(monthSpend)}{trend !== null && <span style={{ color: trend > 0 ? C.coral : C.teal }}> · {trend > 0 ? "+" : ""}{trend}% vs last month</span>}</span>
+          <span><span className="dot" style={{ background: C.amber }} />Everyday {inr(monthSpend)}{trend !== null && <span style={{ color: trend > 0 ? C.coral : C.teal }}> · {trend > 0 ? "+" : ""}{trend}% vs same days last month</span>}</span>
           <span><span className="dot" style={{ background: C.violet }} />Repayments {inr(monthRepaid)}</span>
         </div>
         {budget > 0 && !budgetEdit ? (
@@ -1727,18 +1731,24 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
           <div className="hd" style={{ fontWeight: 600, fontSize: 16, whiteSpace: "nowrap" }}>Where it went</div>
           <Seg options={PERIODS} value={period} onChange={setPeriod} />
         </div>
-        {byCat.length === 0 ? <Empty>Nothing out in this period yet.</Empty> : (
+        {byCat.length === 0 ? <Empty>{pPaid > 0 ? "No everyday spending in this period." : "Nothing out in this period yet."}</Empty> : (
           <div className="row" style={{ gap: 16, alignItems: "flex-start" }}>
             <PieChart slices={byCat.map(x => ({ value: x.total, color: x.color }))} size={112} centerLabel={inr(pTotal)} centerSub={PERIODS.find(p => p[0] === period)[1]} />
             <div style={{ flex: 1, display: "grid", gap: 2 }}>
               {byCat.slice(0, 8).map(x => (
                 <button key={x.c} className="legend" onClick={() => { setCatFilter(catFilter === x.c ? null : x.c); if (x.isLoan) setFilter("all"); }} style={catFilter === x.c ? { background: C.surface2 } : undefined}>
                   <span className="row" style={{ gap: 7 }}><span className="dot" style={{ background: x.color, margin: 0 }} />{x.c}</span>
-                  <span className="num" style={{ fontSize: 13 }}>{Math.round((x.total / pTotal) * 100)}%</span>
+                  <span className="num" style={{ fontSize: 13 }}>{(() => { const pc = (x.total / pTotal) * 100; return pc > 0 && pc < 1 ? "<1" : Math.round(pc); })()}%</span>
                 </button>
               ))}
               {byCat.length > 8 && <div className="sub" style={{ paddingLeft: 8 }}>+ {byCat.length - 8} more</div>}
             </div>
+          </div>
+        )}
+        {pPaid > 0 && (
+          <div className="row" style={{ justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: "1px solid " + C.line, gap: 8 }}>
+            <span className="sub">{withRepay ? "Including" : "Not including"} {inr(pPaid)} of loan repayments</span>
+            <button className="link" onClick={() => setWithRepay(v => !v)}>{withRepay ? "Show everyday only" : "Include them"}</button>
           </div>
         )}
       </div>
