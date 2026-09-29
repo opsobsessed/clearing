@@ -26,7 +26,20 @@ const C = {
 // account for a form. "Debt" here means "accounts", never the loans on the Clear tab.
 const PURPOSE = {
   income: { label: "Salary lands here", short: "Salary", color: C.teal }, living: { label: "Everyday spending", short: "Spending", color: C.amber }, debt: { label: "Pay debts from here", short: "Debt", color: C.violet },
+  grow: { label: "Savings & investments", short: "Growing", color: C.primary },
 };
+// Savings and investment accounts (funds, FDs, savings pots) are tracked separately: they don't
+// count as money in hand, and they remember how much was put in so the gain can be shown.
+const isGrow = (a) => a && a.purpose === "grow";
+const putIn = (a) => a.invested ?? (+a.balance || 0);
+// Moving money in adds to what was put in; taking money out lowers it in proportion.
+function growAfterMove(a, delta) {
+  if (!isGrow(a)) return {};
+  const inv = putIn(a), bal = +a.balance || 0;
+  if (delta >= 0) return { invested: inv + delta };
+  const share = bal > 0 ? Math.min(1, -delta / bal) : 1;
+  return { invested: Math.max(0, Math.round(inv * (1 - share))) };
+}
 const OTYPE = {
   regulated: { label: "Marked Regulated", short: "Marked Regulated", color: C.primary, icon: ShieldCheck },
   payday: { label: "Payday / app loan", short: "Payday", color: C.coral, icon: Zap },
@@ -553,7 +566,7 @@ export default function Clearing({ userId }) {
     if (postStreak >= 30 && !ach.streak30) add.streak30 = localDay();
     if (Object.keys(add).length) setSettings(s => ({ ...s, achieved: { ...(s.achieved || {}), ...add } }));
   }, [ready, settings.wantsSince, planResult.bal, planResult.starter, planResult.full, postStreak]);
-  const moneyInHand = accounts.reduce((s, a) => s + (+a.balance || 0), 0);
+  const moneyInHand = accounts.filter(a => !isGrow(a)).reduce((s, a) => s + (+a.balance || 0), 0);
   const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
   const dueSoon = openOblig
     .map(o => ({ ...o, in: dueInDays(o, payments), ...overdueInfo(o, payments) }))
@@ -612,8 +625,8 @@ export default function Clearing({ userId }) {
     const wc = acc.warChest;
     setAccounts(list => list.map(a => {
       if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: localDay(), a: p.a, b: p.b }].slice(-200) } };
-      if (a.id === wc.fundAId) return { ...a, balance: (+a.balance || 0) + p.a };
-      if (p.b && a.id === wc.fundBId) return { ...a, balance: (+a.balance || 0) + p.b };
+      if (a.id === wc.fundAId) return { ...a, ...growAfterMove(a, p.a), balance: (+a.balance || 0) + p.a };
+      if (p.b && a.id === wc.fundBId) return { ...a, ...growAfterMove(a, p.b), balance: (+a.balance || 0) + p.b };
       return a;
     }));
     const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "fund";
@@ -1080,10 +1093,10 @@ function AccountForm({ onSave, onCancel }) {
       <div className="row" style={{ gap: 8 }}>
         <input className="in num" type="number" placeholder="Balance" value={f.balance || ""} onChange={e => setF({ ...f, balance: +e.target.value })} style={{ flex: 1 }} />
       </div>
-      <div className="row" style={{ gap: 6 }}>{Object.keys(PURPOSE).map(p => (
-        <button key={p} className="btn ghost" onClick={() => setF({ ...f, purpose: p })} style={{ flex: 1, padding: "8px 6px", fontSize: 12, borderColor: f.purpose === p ? PURPOSE[p].color : C.line, color: f.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>{Object.keys(PURPOSE).map(p => (
+        <button key={p} className="btn ghost" onClick={() => setF({ ...f, purpose: p })} style={{ flex: "1 1 40%", padding: "8px 6px", fontSize: 12, borderColor: f.purpose === p ? PURPOSE[p].color : C.line, color: f.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
       ))}</div>
-      <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
+      <button className="btn" disabled={!f.name} onClick={() => onSave(f.purpose === "grow" ? { ...f, invested: +f.balance || 0, valuedOn: localDay() } : f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
     </div>
   );
 }
@@ -2034,7 +2047,10 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
   const [open, setOpen] = useState(null);      // account id for the detail sheet
   const [mode, setMode] = useState(null);      // 'move' | 'pickUpdate' | 'add'
   const monthIn = sum(incomes.filter(i => (i.date || "").slice(0, 7) === localMonth()), i => i.amount);
-  const byPurpose = Object.keys(PURPOSE).map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
+  const byPurpose = Object.keys(PURPOSE).filter(p => p !== "grow").map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
+  const growing = accounts.filter(isGrow);
+  const growNow = sum(growing, a => a.balance), growIn = sum(growing, putIn), growGain = growNow - growIn;
+  const spendable = accounts.filter(a => !isGrow(a));
   const positive = byPurpose.reduce((s, x) => s + Math.max(0, x.total), 0);
   const acc = accounts.find(a => a.id === open);
   return (
@@ -2053,6 +2069,34 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
         <div className="sub" style={{ marginTop: 10 }}>{inr(monthIn)} came in this month</div>
       </div>
 
+      {growing.length > 0 && (
+        <div className="card">
+          <div className="lbl">Savings & investments</div>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+            <div className="num" style={{ fontSize: 28 }}>{inr(growNow)}</div>
+            <span className="num" style={{ fontSize: 14, color: growGain >= 0 ? C.teal : C.coral }}>{growGain >= 0 ? "+" : "−"}{inr(Math.abs(growGain))}</span>
+          </div>
+          <div className="sub">{inr(growIn)} put in · not counted in money in hand</div>
+          <div style={{ marginTop: 8 }}>
+            {growing.map(a => {
+              const g = (+a.balance || 0) - putIn(a);
+              return (
+                <button key={a.id} className="li li-btn" onClick={() => setOpen(a.id)}>
+                  <div style={{ textAlign: "left" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>{a.name}</div>
+                    <div className="sub" style={{ marginTop: 2 }}>{inr(putIn(a))} put in{a.valuedOn ? ` · value checked ${a.valuedOn}` : ""}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="num" style={{ fontSize: 17 }}>{inr(a.balance)}</div>
+                    <div className="num" style={{ fontSize: 12, color: g >= 0 ? C.teal : C.coral }}>{g >= 0 ? "+" : "−"}{inr(Math.abs(g))}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => openQuickAdd("in")}><Plus size={16} /> Add income</button>
         {accounts.length >= 2 && <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setMode("move")}><ArrowRightLeft size={16} /> Move</button>}
@@ -2061,7 +2105,7 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
 
       <div className="card" style={{ padding: "6px 16px" }}>
         {accounts.length === 0 && <Empty>No accounts yet — add the places you hold money.</Empty>}
-        {accounts.map(a => (
+        {spendable.map(a => (
           <button key={a.id} className="li li-btn" onClick={() => setOpen(a.id)}>
             <div style={{ textAlign: "left" }}>
               <div style={{ fontSize: 15, fontWeight: 600 }}>{a.name}</div>
@@ -2079,8 +2123,8 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
 
       {mode === "move" && (
         <Sheet title="Move money" onClose={() => setMode(null)}>
-          <MoveForm accounts={accounts} onMove={(from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, balance: (+a.balance || 0) + amt } : a)); setMode(null); }} onCancel={() => setMode(null)} />
-          <div className="foot">For ATM withdrawals too (bank → cash). Moving money isn't spending, so it doesn't show up in Money.</div>
+          <MoveForm accounts={accounts} onMove={(from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, ...growAfterMove(a, -amt), balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, ...growAfterMove(a, amt), balance: (+a.balance || 0) + amt } : a)); setMode(null); }} onCancel={() => setMode(null)} />
+          <div className="foot">For ATM withdrawals too (bank → cash), and for putting money into a fund or taking it out. Moving money isn't spending, so it doesn't show up in Money.</div>
         </Sheet>
       )}
       {mode === "pickUpdate" && (
@@ -2108,9 +2152,11 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
   const upd = (p) => setAccounts(x => x.map(y => y.id === a.id ? { ...y, ...p } : y));
   const cur = +a.balance || 0;
   const diff = actual === null || actual === "" ? 0 : (+actual - cur);
+  const grow = isGrow(a);
   function applyUpdate() {
     if (actual === "" || actual === null) return;
     const target = +actual;
+    if (grow) { upd({ balance: target, valuedOn: localDay(), invested: putIn(a) }); setActual(null); return; } // a fund's value moving isn't spending or income
     if (how === "spend" && diff < 0) logExpense({ amount: -diff, cat: "Other", note: "balance correction", accountId: "" });
     if (how === "income" && diff > 0) logIncome({ amount: diff, source: "Other", note: "balance correction", accountId: "" });
     upd({ balance: target });
@@ -2119,17 +2165,30 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
   return (
     <Sheet title={a.name} onClose={onClose}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-        <span className="sub">Balance in the app</span>
+        <span className="sub">{grow ? "Worth now" : "Balance in the app"}</span>
         <span className="num" style={{ fontSize: 26, color: cur < 0 ? C.coral : C.text }}>{cur < 0 ? "−" : ""}{inr(Math.abs(cur))}</span>
       </div>
+      {grow && (
+        <div className="panel" style={{ display: "grid", gap: 6 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="sub">Put in so far</span>
+            <input className="in num" style={{ width: 130, textAlign: "right" }} type="number" value={putIn(a)} onChange={e => upd({ invested: +e.target.value })} />
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="sub">Gain</span>
+            <span className="num" style={{ color: cur - putIn(a) >= 0 ? C.teal : C.coral }}>{cur - putIn(a) >= 0 ? "+" : "−"}{inr(Math.abs(cur - putIn(a)))}</span>
+          </div>
+          <div className="foot">Money you move in (or invest from the jar) adds to "put in" automatically. Tap Update value when you check the fund app{a.valuedOn ? ` — last checked ${a.valuedOn}` : ""}.</div>
+        </div>
+      )}
 
       {actual === null ? (
-        <button className="btn" style={{ justifyContent: "center" }} onClick={() => setActual("")}>Update balance</button>
+        <button className="btn" style={{ justifyContent: "center" }} onClick={() => setActual("")}>{grow ? "Update value" : "Update balance"}</button>
       ) : (
         <div className="panel">
-          <span className="lbl">What does {a.name} actually have right now?</span>
+          <span className="lbl">{grow ? `What is ${a.name} worth right now?` : `What does ${a.name} actually have right now?`}</span>
           <input className="in num big" type="number" inputMode="decimal" autoFocus value={actual} onChange={e => setActual(e.target.value)} placeholder="₹ 0" />
-          {actual !== "" && diff !== 0 && (
+          {!grow && actual !== "" && diff !== 0 && (
             <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
               <div className="sub">That's {diff > 0 ? "₹" + Math.abs(diff).toLocaleString("en-IN") + " more" : "₹" + Math.abs(diff).toLocaleString("en-IN") + " less"} than the app shows.</div>
               <Pill on={how === "set"} onClick={() => setHow("set")}>Just correct the balance</Pill>
@@ -2148,7 +2207,7 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
       <input className="in" value={name} onChange={e => setName(e.target.value)} onBlur={() => name.trim() && name !== a.name && upd({ name: name.trim() })} />
       <span className="lbl">What this account is for</span>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {Object.keys(PURPOSE).map(p => <Pill key={p} on={a.purpose === p} color={PURPOSE[p].color} onClick={() => upd({ purpose: p })}>{PURPOSE[p].label}</Pill>)}
+        {Object.keys(PURPOSE).map(p => <Pill key={p} on={a.purpose === p} color={PURPOSE[p].color} onClick={() => upd({ purpose: p, ...(p === "grow" && a.invested === undefined ? { invested: +a.balance || 0 } : {}) })}>{PURPOSE[p].label}</Pill>)}
       </div>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         <Pill on={!!a.isCash} color={C.teal} onClick={() => upd({ isCash: !a.isCash })}>💵 Physical cash</Pill>
