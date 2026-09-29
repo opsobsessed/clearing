@@ -100,6 +100,23 @@ function nextWarChestLog(wc, todayStr) {
   const expectedPrevKey = localDay(d);
   return { lastLoggedDate: todayStr, streak: lastKey === expectedPrevKey ? (+wc.streak || 0) + 1 : 1 };
 }
+// Engagement mode: the day's amount comes from yesterday's video views instead of a fixed target.
+// ₹ per 1,000 views, rounded to the nearest rupee, never more than the daily cap.
+function jarAmountFromViews(wc, views) {
+  const rate = +wc.ratePer1k || 10;
+  const cap = +wc.dailyCap || 100;
+  return Math.max(0, Math.min(cap, Math.round((+views || 0) / 1000 * rate)));
+}
+// How much of the jar to move into the funds right now: whole lots of the minimum (₹500 by
+// default, since both funds need ₹100 per purchase), split by the chosen share.
+function jarInvestPlan(wc, balance) {
+  const lot = +wc.investLot || 500;
+  const total = Math.floor(Math.max(0, +balance || 0) / lot) * lot;
+  if (!total || !wc.fundAId) return null;
+  const shareA = wc.fundBId ? Math.min(1, Math.max(0, +wc.fundAShare || 0.8)) : 1;
+  const a = Math.round((total * shareA) / 100) * 100;
+  return { total, a, b: total - a };
+}
 function buildUpiLink(vpa, amount, note) {
   return `upi://pay?pa=${encodeURIComponent(vpa)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note || "War chest")}`;
 }
@@ -556,19 +573,39 @@ export default function Clearing({ userId }) {
   // war-chest account and advances the streak. This never touches a real bank — it's the same
   // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
   // optional UPI deep link) is still on the person, this just keeps score.
-  function logWarChest(accountId) {
+  function logWarChest(accountId, views) {
     const today = localDay();
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
     const step = nextWarChestLog(acc.warChest, today);
     if (!step) return; // already logged this period
-    const amt = +acc.warChest.target || 0;
+    const byViews = acc.warChest.mode === "views";
+    const amt = byViews ? jarAmountFromViews(acc.warChest, views) : (+acc.warChest.target || 0);
+    const entry = { date: today, amount: amt, ...(byViews ? { views: +views || 0 } : {}) };
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step } };
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
       if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
       return a;
     }));
-    setCelebrate(step.streak > 1 ? `₹${amt} into your war chest — ${step.streak} in a row.` : `₹${amt} into your war chest.`);
+    const lead = byViews ? `${new Intl.NumberFormat("en-IN").format(+views || 0)} views → ₹${amt} into the jar` : `₹${amt} into your jar`;
+    setCelebrate(step.streak > 1 ? `${lead} — ${step.streak} in a row.` : `${lead}.`);
+  }
+  // Moves whole ₹500 lots from the jar into the fund accounts (80/20 by default). Like everything
+  // else here it only keeps score — the actual purchase is still done in the fund app.
+  function investJar(accountId) {
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc || !acc.warChest?.on) return;
+    const p = jarInvestPlan(acc.warChest, acc.balance);
+    if (!p) return;
+    const wc = acc.warChest;
+    setAccounts(list => list.map(a => {
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: localDay(), a: p.a, b: p.b }].slice(-200) } };
+      if (a.id === wc.fundAId) return { ...a, balance: (+a.balance || 0) + p.a };
+      if (p.b && a.id === wc.fundBId) return { ...a, balance: (+a.balance || 0) + p.b };
+      return a;
+    }));
+    const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "fund";
+    setCelebrate(`Moved ₹${p.a} to ${nameOf(wc.fundAId)}${p.b ? ` and ₹${p.b} to ${nameOf(wc.fundBId)}` : ""}. Now buy it in the fund app.`);
   }
 
   // One-tap version of "pin every open family/friend debt to the top" — what the money-freed
@@ -706,7 +743,7 @@ export default function Clearing({ userId }) {
           <WantsCard wants={wantsList} picks={picks} nextHint={nextWantHint} onOpen={() => setWantsOpen(true)} />
         </div>
       )}
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
       {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
@@ -757,41 +794,77 @@ export default function Clearing({ userId }) {
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+function JarCard({ wcAccount, accounts, logWarChest, investJar, setTab }) {
+  const wc = wcAccount.warChest;
+  const byViews = wc.mode === "views";
+  const [views, setViews] = useState("");
+  const today = localDay();
+  const alreadyLogged = !nextWarChestLog(wc, today);
+  const amt = byViews ? jarAmountFromViews(wc, views) : (+wc.target || 0);
+  const upiLink = wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byViews ? "Engagement jar" : "Jar") : null;
+  const plan = jarInvestPlan(wc, wcAccount.balance);
+  const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
+  const hist = (wc.history || []).slice(-5).reverse();
+  const fmt = (n) => new Intl.NumberFormat("en-IN").format(+n || 0);
+  const capped = byViews && views !== "" && Math.round((+views || 0) / 1000 * (+wc.ratePer1k || 10)) > (+wc.dailyCap || 100);
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="lbl" style={{ margin: 0 }}>{byViews ? "Engagement jar" : "Jar"} — {wcAccount.name}</div>
+        {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
+      </div>
+      <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>in the jar, waiting to be invested</div>
+      {byViews && !alreadyLogged && (
+        <div style={{ marginTop: 10 }}>
+          <span className="lbl">Views on yesterday's video</span>
+          <div className="row" style={{ gap: 8 }}>
+            <input className="in num" style={{ flex: 1 }} type="number" inputMode="numeric" placeholder="e.g. 3200" value={views} onChange={e => setViews(e.target.value)} />
+            <div className="num" style={{ fontSize: 20, minWidth: 70, textAlign: "right", color: C.violet }}>₹{amt}</div>
+          </div>
+          <div className="sub" style={{ marginTop: 4 }}>₹{+wc.ratePer1k || 10} per 1,000 views · max ₹{+wc.dailyCap || 100} a day{capped ? " — capped today" : ""}</div>
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, marginTop: 10 }}>
+        {upiLink && !alreadyLogged && (
+          <a href={upiLink} style={{ textDecoration: "none", flex: 1 }}>
+            <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{amt} via UPI</div>
+          </a>
+        )}
+        <button className="btn" disabled={alreadyLogged || (byViews && (views === "" || amt <= 0))} onClick={() => { logWarChest(wcAccount.id, views); setViews(""); }}
+          style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
+          {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log ₹${amt}`}
+        </button>
+      </div>
+      {plan && (
+        <button className="btn" onClick={() => investJar(wcAccount.id)} style={{ marginTop: 8, width: "100%", justifyContent: "center", background: C.teal }}>
+          Invest ₹{plan.a} → {nameOf(wc.fundAId)}{plan.b ? ` + ₹${plan.b} → ${nameOf(wc.fundBId)}` : ""}
+        </button>
+      )}
+      {!plan && wc.fundAId && (+wcAccount.balance || 0) > 0 && (
+        <div className="sub" style={{ marginTop: 8 }}>{inr((+wc.investLot || 500) - ((+wcAccount.balance || 0) % (+wc.investLot || 500)))} more and it's time to invest.</div>
+      )}
+      {!wc.fundAId && (+wcAccount.balance || 0) > 0 && (
+        <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
+      )}
+      {hist.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          {hist.map((h, i) => (
+            <div key={i} className="row" style={{ justifyContent: "space-between", fontSize: 12.5, color: C.muted, padding: "3px 0" }}>
+              <span>{h.date}{h.views !== undefined ? ` · ${fmt(h.views)} views` : ""}</span><span className="num" style={{ color: C.text }}>+₹{h.amount}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+  const wcAccount = accounts.find(a => a.warChest?.on);
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {(() => {
-        const wcAccount = accounts.find(a => a.warChest?.on);
-        if (!wcAccount) return null;
-        const wc = wcAccount.warChest;
-        const today = localDay();
-        const alreadyLogged = !nextWarChestLog(wc, today);
-        const upiLink = wc.vpa ? buildUpiLink(wc.vpa, wc.target, "War chest") : null;
-        return (
-          <div className="card">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="lbl" style={{ margin: 0 }}>War chest — {wcAccount.name}</div>
-              {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
-            </div>
-            <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
-            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>saved toward friends & family so far</div>
-            <div className="row" style={{ gap: 8, marginTop: 10 }}>
-              {upiLink && !alreadyLogged && (
-                <a href={upiLink} style={{ textDecoration: "none", flex: 1 }}>
-                  <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{wc.target} via UPI</div>
-                </a>
-              )}
-              <button className="btn" disabled={alreadyLogged} onClick={() => logWarChest(wcAccount.id)}
-                style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
-                {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log today's ₹${wc.target}`}
-              </button>
-            </div>
-            {(+wcAccount.balance || 0) > 0 && (
-              <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
-            )}
-          </div>
-        );
-      })()}
+      {wcAccount && <JarCard {...{ wcAccount, accounts, logWarChest, investJar, setTab }} />}
       {paydayUnderControl && freedMonthly > 0 && (
         <div className="card" style={{ border: "1px solid " + C.teal }}>
           <div className="lbl">Money freed up each month</div>
@@ -1978,7 +2051,7 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
               <div className="row" style={{ gap: 6, marginTop: 3 }}>
                 {a.purpose && <span className="tag" style={{ color: PURPOSE[a.purpose].color, borderColor: PURPOSE[a.purpose].color }}>{PURPOSE[a.purpose].short}</span>}
                 {a.isCash && <span className="tag">💵 Cash</span>}
-                {a.warChest?.on && <span className="tag">War chest</span>}
+                {a.warChest?.on && <span className="tag">{a.warChest.mode === "views" ? "Engagement jar" : "Jar"}</span>}
               </div>
             </div>
             <span className="num" style={{ fontSize: 19, color: (+a.balance || 0) < 0 ? C.coral : C.text }}>{(+a.balance || 0) < 0 ? "−" : ""}{inr(Math.abs(+a.balance || 0))}</span>
@@ -2062,15 +2135,39 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
       </div>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         <Pill on={!!a.isCash} color={C.teal} onClick={() => upd({ isCash: !a.isCash })}>💵 Physical cash</Pill>
-        <Pill on={!!a.warChest?.on} color={C.violet} onClick={() => upd({ warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}>War chest</Pill>
+        <Pill on={!!a.warChest?.on} color={C.violet} onClick={() => upd({ warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}>Jar</Pill>
       </div>
       {a.warChest?.on && (
         <div className="panel" style={{ display: "grid", gap: 8 }}>
-          <div className="sub">Small, steady amounts set aside here for friends & family repayments.</div>
+          <div className="sub">Small, steady amounts set aside here, then moved into your funds.</div>
+          <Seg options={[["fixed", "Fixed amount"], ["views", "From video views"]]} value={a.warChest.mode || "fixed"}
+            onChange={(v) => upd({ warChest: { ...a.warChest, mode: v, ...(v === "views" ? { cadence: "daily", ratePer1k: a.warChest.ratePer1k || 10, dailyCap: a.warChest.dailyCap || 100 } : {}) } })} />
+          {(a.warChest.mode || "fixed") === "fixed" ? (
+            <div className="row" style={{ gap: 8 }}>
+              <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
+              <Seg options={[["daily", "per day"], ["weekly", "per week"]]} value={a.warChest.cadence} onChange={(v) => upd({ warChest: { ...a.warChest, cadence: v } })} />
+            </div>
+          ) : (
+            <div className="row" style={{ gap: 8 }}>
+              <div style={{ flex: 1 }}><span className="lbl">₹ per 1,000 views</span>
+                <input className="in num" type="number" value={a.warChest.ratePer1k ?? 10} onChange={e => upd({ warChest: { ...a.warChest, ratePer1k: +e.target.value } })} /></div>
+              <div style={{ flex: 1 }}><span className="lbl">Daily cap ₹</span>
+                <input className="in num" type="number" value={a.warChest.dailyCap ?? 100} onChange={e => upd({ warChest: { ...a.warChest, dailyCap: +e.target.value } })} /></div>
+            </div>
+          )}
+          <span className="lbl" style={{ marginTop: 4 }}>Invest into (add each fund as an account first)</span>
           <div className="row" style={{ gap: 8 }}>
-            <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
-            <Seg options={[["daily", "per day"], ["weekly", "per week"]]} value={a.warChest.cadence} onChange={(v) => upd({ warChest: { ...a.warChest, cadence: v } })} />
+            <select className="in" style={{ flex: 2 }} value={a.warChest.fundAId || ""} onChange={e => upd({ warChest: { ...a.warChest, fundAId: e.target.value } })}>
+              <option value="">Main fund…</option>
+              {accounts.filter(x => x.id !== a.id).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <input className="in num" style={{ flex: 1 }} type="number" title="Main fund share %" value={Math.round((a.warChest.fundAShare ?? 0.8) * 100)} onChange={e => upd({ warChest: { ...a.warChest, fundAShare: Math.min(100, Math.max(0, +e.target.value)) / 100 } })} />
           </div>
+          <select className="in" value={a.warChest.fundBId || ""} onChange={e => upd({ warChest: { ...a.warChest, fundBId: e.target.value } })}>
+            <option value="">Second fund (optional)…</option>
+            {accounts.filter(x => x.id !== a.id && x.id !== a.warChest.fundAId).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+          <div className="sub">The jar is invested in whole ₹{a.warChest.investLot || 500} lots, {Math.round((a.warChest.fundAShare ?? 0.8) * 100)}% to the main fund and the rest to the second.</div>
           {accounts.length > 1 && (
             <select className="in" value={a.warChest.fromAccountId || ""} onChange={e => upd({ warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
               <option value="">Comes out of…</option>
