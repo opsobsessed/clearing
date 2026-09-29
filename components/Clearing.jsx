@@ -615,6 +615,20 @@ export default function Clearing({ userId }) {
     const lead = `₹${amt} into your jar`;
     setCelebrate(step.streak > 1 ? `${lead} — ${step.streak} in a row.` : `${lead}.`);
   }
+  // Extra money into the jar on top of the daily amount — any amount, no daily cap, doesn't touch
+  // the streak. It's invested with the rest of the jar in the next ₹500 lots.
+  function topUpJar(accountId, amount) {
+    const amt = Math.round(+amount || 0);
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc || !acc.warChest?.on || amt <= 0) return;
+    const entry = { date: localDay(), amount: amt, topUp: true };
+    setAccounts(list => list.map(a => {
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, history: [...(a.warChest.history || []), entry].slice(-400) } };
+      if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
+      return a;
+    }));
+    setCelebrate(`₹${amt} topped up into your jar.`);
+  }
   // Moves whole ₹500 lots from the jar into the fund accounts (80/20 by default). Like everything
   // else here it only keeps score — the actual purchase is still done in the fund app.
   function investJar(accountId) {
@@ -768,7 +782,7 @@ export default function Clearing({ userId }) {
           <WantsCard wants={wantsList} picks={picks} nextHint={nextWantHint} onOpen={() => setWantsOpen(true)} />
         </div>
       )}
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
       {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
@@ -820,7 +834,8 @@ export default function Clearing({ userId }) {
   );
 }
 
-function JarCard({ wcAccount, accounts, logWarChest, investJar, setTab }) {
+function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab }) {
+  const [topUp, setTopUp] = useState(null); // null = closed, otherwise the amount being typed
   const wc = wcAccount.warChest;
   const byEng = isEngage(wc);
   const [eng, setEng] = useState({ comments: "", shares: "", saves: "" });
@@ -866,6 +881,15 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, setTab }) {
           {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log ₹${amt}`}
         </button>
       </div>
+      {topUp === null ? (
+        <button className="btn ghost" onClick={() => setTopUp("")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 13 }}><Plus size={14} /> Top up</button>
+      ) : (
+        <div className="row" style={{ gap: 8, marginTop: 8 }}>
+          <input className="in num" style={{ flex: 1 }} type="number" inputMode="numeric" autoFocus placeholder="Extra ₹ into the jar" value={topUp} onChange={e => setTopUp(e.target.value)} />
+          <button className="btn ghost" onClick={() => setTopUp(null)}>Cancel</button>
+          <button className="btn" disabled={!(+topUp > 0)} onClick={() => { topUpJar(wcAccount.id, topUp); setTopUp(null); }} style={{ background: C.violet }}>Add</button>
+        </div>
+      )}
       {plan && (
         <button className="btn" onClick={() => investJar(wcAccount.id)} style={{ marginTop: 8, width: "100%", justifyContent: "center", background: C.teal }}>
           Invest ₹{plan.a} → {nameOf(wc.fundAId)}{plan.b ? ` + ₹${plan.b} → ${nameOf(wc.fundBId)}` : ""}
@@ -881,7 +905,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, setTab }) {
         <div style={{ marginTop: 10 }}>
           {hist.map((h, i) => (
             <div key={i} className="row" style={{ justifyContent: "space-between", fontSize: 12.5, color: C.muted, padding: "3px 0" }}>
-              <span>{h.date}{h.comments !== undefined ? ` · ${fmt((+h.comments || 0) + (+h.shares || 0) + (+h.saves || 0))} engagements` : h.views !== undefined ? ` · ${fmt(h.views)} views` : ""}</span><span className="num" style={{ color: C.text }}>+₹{h.amount}</span>
+              <span>{h.date}{h.topUp ? " · top-up" : h.comments !== undefined ? ` · ${fmt((+h.comments || 0) + (+h.shares || 0) + (+h.saves || 0))} engagements` : h.views !== undefined ? ` · ${fmt(h.views)} views` : ""}</span><span className="num" style={{ color: C.text }}>+₹{h.amount}</span>
             </div>
           ))}
         </div>
@@ -890,11 +914,11 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, setTab }) {
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
   const wcAccount = accounts.find(a => a.warChest?.on);
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {wcAccount && <JarCard {...{ wcAccount, accounts, logWarChest, investJar, setTab }} />}
+      {wcAccount && <JarCard {...{ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab }} />}
       {paydayUnderControl && freedMonthly > 0 && (
         <div className="card" style={{ border: "1px solid " + C.teal }}>
           <div className="lbl">Money freed up each month</div>
