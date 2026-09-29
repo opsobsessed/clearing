@@ -26,7 +26,20 @@ const C = {
 // account for a form. "Debt" here means "accounts", never the loans on the Clear tab.
 const PURPOSE = {
   income: { label: "Salary lands here", short: "Salary", color: C.teal }, living: { label: "Everyday spending", short: "Spending", color: C.amber }, debt: { label: "Pay debts from here", short: "Debt", color: C.violet },
+  grow: { label: "Savings & investments", short: "Growing", color: C.primary },
 };
+// Savings and investment accounts (funds, FDs, savings pots) are tracked separately: they don't
+// count as money in hand, and they remember how much was put in so the gain can be shown.
+const isGrow = (a) => a && a.purpose === "grow";
+const putIn = (a) => a.invested ?? (+a.balance || 0);
+// Moving money in adds to what was put in; taking money out lowers it in proportion.
+function growAfterMove(a, delta) {
+  if (!isGrow(a)) return {};
+  const inv = putIn(a), bal = +a.balance || 0;
+  if (delta >= 0) return { invested: inv + delta };
+  const share = bal > 0 ? Math.min(1, -delta / bal) : 1;
+  return { invested: Math.max(0, Math.round(inv * (1 - share))) };
+}
 const OTYPE = {
   regulated: { label: "Marked Regulated", short: "Marked Regulated", color: C.primary, icon: ShieldCheck },
   payday: { label: "Payday / app loan", short: "Payday", color: C.coral, icon: Zap },
@@ -100,6 +113,26 @@ function nextWarChestLog(wc, todayStr) {
   const expectedPrevKey = localDay(d);
   return { lastLoggedDate: todayStr, streak: lastKey === expectedPrevKey ? (+wc.streak || 0) + 1 : 1 };
 }
+// Engagement mode: a daily base (so a quiet day still counts) plus ₹1 for every comment, share
+// and save on yesterday's post, never more than the daily cap. Older "views" setups read as this.
+const isEngage = (wc) => wc && (wc.mode === "engage" || wc.mode === "views");
+function jarAmountFromEngagement(wc, e) {
+  const base = +(wc.base ?? 25) || 0;
+  const per = +(wc.perAction ?? 1) || 0;
+  const cap = +wc.dailyCap || 100;
+  const acts = (+e?.comments || 0) + (+e?.shares || 0) + (+e?.saves || 0);
+  return Math.max(0, Math.min(cap, Math.round(base + acts * per)));
+}
+// How much of the jar to move into the funds right now: whole lots of the minimum (₹500 by
+// default, since both funds need ₹100 per purchase), split by the chosen share.
+function jarInvestPlan(wc, balance) {
+  const lot = +wc.investLot || 500;
+  const total = Math.floor(Math.max(0, +balance || 0) / lot) * lot;
+  if (!total || !wc.fundAId) return null;
+  const shareA = wc.fundBId ? Math.min(1, Math.max(0, +wc.fundAShare || 0.8)) : 1;
+  const a = Math.round((total * shareA) / 100) * 100;
+  return { total, a, b: total - a };
+}
 function buildUpiLink(vpa, amount, note) {
   return `upi://pay?pa=${encodeURIComponent(vpa)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note || "War chest")}`;
 }
@@ -123,11 +156,16 @@ function cardDueDate(o, payments) {
   return null;
 }
 const daysBetween = (a, b) => Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
+// A loan can have a date its repayments start (e.g. a new loan with EMIs from December). Before
+// then it's never "due" or "overdue", and the salary plan doesn't budget for it.
+const notStartedYet = (o, onDate = localDay()) => !!o.startsOn && onDate < o.startsOn;
 function dueInDays(o, payments) {
+  if (notStartedYet(o)) return daysBetween(localDay(), o.startsOn);
   if (o.isCreditCard) { const due = cardDueDate(o, payments); return due ? daysBetween(localDay(), due) : null; }
   return daysUntil(o.dueDay);
 }
 function overdueInfo(o, payments) {
+  if (notStartedYet(o)) return { overdue: false, startsOn: o.startsOn };
   if (o.isCreditCard) {
     if (o.status === "closed" || o.status === "settled") return { overdue: false };
     const due = cardDueDate(o, payments);
@@ -497,7 +535,18 @@ export default function Clearing({ userId }) {
     });
     if (logged) { setSettings(s => ({ ...s, recurring: updated })); setCelebrate(`Logged ${logged} repeating spend${logged > 1 ? "s" : ""} for you.`); }
   }, [ready, localDay()]);
-  const snapshotInput = useMemo(() => ({ expenses, payments, incomes, oblig, sourceLabel: incomeSourceLabel, budget: settings.budget }), [expenses, payments, incomes, oblig, settings.budget]);
+  // What the jar-first Money Log frame needs: the jar account's balance, its daily entries, what
+  // moved into the funds and the fund names.
+  const jarForLog = useMemo(() => {
+    const acc = accounts.find(a => a.warChest?.on);
+    if (!acc) return null;
+    const wc = acc.warChest, nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
+    return { balance: +acc.balance || 0, lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 1) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
+  }, [accounts]);
+  // The starting line for "how much of my debt is gone": set once (today, what's open now) and editable in Settings.
+  const owedNow = oblig.filter(o => o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
+  useEffect(() => { if (ready && !settings.baseline && owedNow > 0) setSettings(s => s.baseline ? s : { ...s, baseline: { date: localDay(), total: Math.round(owedNow) } }); }, [ready]);
+  const snapshotInput = useMemo(() => ({ expenses, payments, incomes, oblig, accounts, sourceLabel: incomeSourceLabel, budget: settings.budget, baseline: settings.baseline, ffMonthly: planResult.ffTotal }), [expenses, payments, incomes, oblig, accounts, settings.budget, settings.baseline, planResult.ffTotal]);
   const firstEntryDate = useMemo(() => [...expenses, ...incomes, ...payments].map(x => x.date).filter(Boolean).sort()[0] || localDay(), [expenses, incomes, payments]);
   // Day numbers count posts, not calendar days: the next post is your last posted day + 1, so a
   // missed day doesn't break the sequence. Before the first post, it counts from your first entry.
@@ -525,7 +574,7 @@ export default function Clearing({ userId }) {
     if (postStreak >= 30 && !ach.streak30) add.streak30 = localDay();
     if (Object.keys(add).length) setSettings(s => ({ ...s, achieved: { ...(s.achieved || {}), ...add } }));
   }, [ready, settings.wantsSince, planResult.bal, planResult.starter, planResult.full, postStreak]);
-  const moneyInHand = accounts.reduce((s, a) => s + (+a.balance || 0), 0);
+  const moneyInHand = accounts.filter(a => !isGrow(a)).reduce((s, a) => s + (+a.balance || 0), 0);
   const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
   const dueSoon = openOblig
     .map(o => ({ ...o, in: dueInDays(o, payments), ...overdueInfo(o, payments) }))
@@ -538,7 +587,9 @@ export default function Clearing({ userId }) {
   const monthSpend = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
 
   const debtStrategy = settings.payoffStrategy || "avalanche";
-  const debtExtra = +settings.extraMonthly || 0;
+  // When a salary plan exists, what it sends to friends & family each month is the real "extra".
+  const planExtra = plan.salary ? Math.max(0, Math.round(planResult.ffTotal)) : null;
+  const debtExtra = planExtra ?? (+settings.extraMonthly || 0);
   const debtPlan = useMemo(() => buildPayoffPlan(oblig, debtExtra, debtStrategy), [oblig, debtExtra, debtStrategy]);
 
   // "Money freed" only means something once the highest-risk debt is actually handled — surfacing
@@ -556,19 +607,54 @@ export default function Clearing({ userId }) {
   // war-chest account and advances the streak. This never touches a real bank — it's the same
   // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
   // optional UPI deep link) is still on the person, this just keeps score.
-  function logWarChest(accountId) {
+  function logWarChest(accountId, eng) {
     const today = localDay();
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
     const step = nextWarChestLog(acc.warChest, today);
     if (!step) return; // already logged this period
-    const amt = +acc.warChest.target || 0;
+    const byEng = isEngage(acc.warChest);
+    const e = { comments: +eng?.comments || 0, shares: +eng?.shares || 0, saves: +eng?.saves || 0 };
+    const amt = byEng ? jarAmountFromEngagement(acc.warChest, e) : (+acc.warChest.target || 0);
+    const entry = { date: today, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e } : {}) };
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step } };
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
       if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
       return a;
     }));
-    setCelebrate(step.streak > 1 ? `₹${amt} into your war chest — ${step.streak} in a row.` : `₹${amt} into your war chest.`);
+    const lead = `₹${amt} into your jar`;
+    setCelebrate(step.streak > 1 ? `${lead} — ${step.streak} in a row.` : `${lead}.`);
+  }
+  // Extra money into the jar on top of the daily amount — any amount, no daily cap, doesn't touch
+  // the streak. It's invested with the rest of the jar in the next ₹500 lots.
+  function topUpJar(accountId, amount) {
+    const amt = Math.round(+amount || 0);
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc || !acc.warChest?.on || amt <= 0) return;
+    const entry = { date: localDay(), amount: amt, topUp: true };
+    setAccounts(list => list.map(a => {
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, history: [...(a.warChest.history || []), entry].slice(-400) } };
+      if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
+      return a;
+    }));
+    setCelebrate(`₹${amt} topped up into your jar.`);
+  }
+  // Moves whole ₹500 lots from the jar into the fund accounts (80/20 by default). Like everything
+  // else here it only keeps score — the actual purchase is still done in the fund app.
+  function investJar(accountId) {
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc || !acc.warChest?.on) return;
+    const p = jarInvestPlan(acc.warChest, acc.balance);
+    if (!p) return;
+    const wc = acc.warChest;
+    setAccounts(list => list.map(a => {
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: localDay(), a: p.a, b: p.b }].slice(-200) } };
+      if (a.id === wc.fundAId) return { ...a, ...growAfterMove(a, p.a), balance: (+a.balance || 0) + p.a };
+      if (p.b && a.id === wc.fundBId) return { ...a, ...growAfterMove(a, p.b), balance: (+a.balance || 0) + p.b };
+      return a;
+    }));
+    const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "fund";
+    setCelebrate(`Moved ₹${p.a} to ${nameOf(wc.fundAId)}${p.b ? ` and ₹${p.b} to ${nameOf(wc.fundBId)}` : ""}. Now buy it in the fund app.`);
   }
 
   // One-tap version of "pin every open family/friend debt to the top" — what the money-freed
@@ -706,10 +792,10 @@ export default function Clearing({ userId }) {
           <WantsCard wants={wantsList} picks={picks} nextHint={nextWantHint} onOpen={() => setWantsOpen(true)} />
         </div>
       )}
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
       {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }} />}
-      {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
+      {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, planExtra, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
       {tab === "clear" && <RepaymentsBreakdown {...{ payments, oblig }} />}
       {planOpen && <SalaryPlanSheet {...{ plan, setPlan, accounts }} salaryLogged={incomes.some(i => (i.date || "").slice(0, 7) === localMonth() && (i.source === "Salary" || !i.source))} result={planResult} onLog={logPlan} onClose={() => setPlanOpen(false)} />}
       {ready && unseenAch.length > 0 && !quickAdd && !planOpen && !wantsOpen && !logDate && (
@@ -745,6 +831,7 @@ export default function Clearing({ userId }) {
           onPosted={(d, rec) => setSettings(s => ({ ...s, logPosts: { ...(s.logPosts || {}), [d]: rec } }))}
           reminder={settings.logReminder} onReminder={(on) => setSettings(s => ({ ...s, logReminder: on }))}
           privateDefault={settings.logPrivate2 ?? false} onPrivateChange={(v) => setSettings(s => ({ ...s, logPrivate2: v }))}
+          jar={jarForLog}
           onClose={() => setLogDate(null)} />
       )}
       <div className="tabbar">
@@ -757,54 +844,91 @@ export default function Clearing({ userId }) {
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab }) {
+  const [topUp, setTopUp] = useState(null); // null = closed, otherwise the amount being typed
+  const wc = wcAccount.warChest;
+  const byEng = isEngage(wc);
+  const [eng, setEng] = useState({ comments: "", shares: "", saves: "" });
+  const today = localDay();
+  const alreadyLogged = !nextWarChestLog(wc, today);
+  const amt = byEng ? jarAmountFromEngagement(wc, eng) : (+wc.target || 0);
+  const upiLink = wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byEng ? "Engagement jar" : "Jar") : null;
+  const plan = jarInvestPlan(wc, wcAccount.balance);
+  const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
+  const hist = (wc.history || []).slice(-5).reverse();
+  const fmt = (n) => new Intl.NumberFormat("en-IN").format(+n || 0);
+  const perAct = +(wc.perAction ?? 1) || 0;
+  const capped = byEng && (+(wc.base ?? 25) + ((+eng.comments || 0) + (+eng.shares || 0) + (+eng.saves || 0)) * perAct) > (+wc.dailyCap || 100);
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      {(() => {
-        const wcAccount = accounts.find(a => a.warChest?.on);
-        if (!wcAccount) return null;
-        const wc = wcAccount.warChest;
-        const today = localDay();
-        const alreadyLogged = !nextWarChestLog(wc, today);
-        const upiLink = wc.vpa ? buildUpiLink(wc.vpa, wc.target, "War chest") : null;
-        return (
-          <div className="card">
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div className="lbl" style={{ margin: 0 }}>War chest — {wcAccount.name}</div>
-              {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
-            </div>
-            <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
-            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>saved toward friends & family so far</div>
-            <div className="row" style={{ gap: 8, marginTop: 10 }}>
-              {upiLink && !alreadyLogged && (
-                <a href={upiLink} style={{ textDecoration: "none", flex: 1 }}>
-                  <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{wc.target} via UPI</div>
-                </a>
-              )}
-              <button className="btn" disabled={alreadyLogged} onClick={() => logWarChest(wcAccount.id)}
-                style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
-                {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log today's ₹${wc.target}`}
-              </button>
-            </div>
-            {(+wcAccount.balance || 0) > 0 && (
-              <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
-            )}
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="lbl" style={{ margin: 0 }}>{byEng ? "Engagement jar" : "Jar"} — {wcAccount.name}</div>
+        {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
+      </div>
+      <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>in the jar, waiting to be invested</div>
+      {byEng && !alreadyLogged && (
+        <div style={{ marginTop: 10 }}>
+          <span className="lbl">On yesterday's post (leave blank if none)</span>
+          <div className="row" style={{ gap: 8 }}>
+            {[["comments", "Comments"], ["shares", "Shares"], ["saves", "Saves"]].map(([k, label]) => (
+              <input key={k} className="in num" style={{ flex: 1, minWidth: 0 }} type="number" inputMode="numeric" min="0" placeholder={label} aria-label={label}
+                value={eng[k]} onChange={e => setEng(x => ({ ...x, [k]: e.target.value }))} />
+            ))}
+            <div className="num" style={{ fontSize: 20, minWidth: 56, textAlign: "right", color: C.violet }}>₹{amt}</div>
           </div>
-        );
-      })()}
-      {paydayUnderControl && freedMonthly > 0 && (
-        <div className="card" style={{ border: "1px solid " + C.teal }}>
-          <div className="lbl">Money freed up each month</div>
-          <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4, color: C.teal }}>{inr(freedMonthly)}</div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
-            No payday loans left open — the monthly payments that used to go to them are free now.
-            {openFamily.length > 0 ? " Worth putting toward family & friends next." : ""}
-          </div>
-          {openFamily.length > 0 && (
-            <button className="btn ghost" onClick={() => { prioritizeFamily(); setTab("clear"); }} style={{ marginTop: 10, fontSize: 12 }}>Prioritize family & friends now →</button>
-          )}
+          <div className="sub" style={{ marginTop: 4 }}>₹{+(wc.base ?? 25) || 0} base + ₹{perAct} each · max ₹{+wc.dailyCap || 100} a day{capped ? " — capped today" : ""}</div>
         </div>
       )}
+      <div className="row" style={{ gap: 8, marginTop: 10 }}>
+        {upiLink && !alreadyLogged && (
+          <a href={upiLink} style={{ textDecoration: "none", flex: 1 }}>
+            <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{amt} via UPI</div>
+          </a>
+        )}
+        <button className="btn" disabled={alreadyLogged || amt <= 0} onClick={() => { logWarChest(wcAccount.id, eng); setEng({ comments: "", shares: "", saves: "" }); }}
+          style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
+          {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log ₹${amt}`}
+        </button>
+      </div>
+      {topUp === null ? (
+        <button className="btn ghost" onClick={() => setTopUp("")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 13 }}><Plus size={14} /> Top up</button>
+      ) : (
+        <div className="row" style={{ gap: 8, marginTop: 8 }}>
+          <input className="in num" style={{ flex: 1 }} type="number" inputMode="numeric" autoFocus placeholder="Extra ₹ into the jar" value={topUp} onChange={e => setTopUp(e.target.value)} />
+          <button className="btn ghost" onClick={() => setTopUp(null)}>Cancel</button>
+          <button className="btn" disabled={!(+topUp > 0)} onClick={() => { topUpJar(wcAccount.id, topUp); setTopUp(null); }} style={{ background: C.violet }}>Add</button>
+        </div>
+      )}
+      {plan && (
+        <button className="btn" onClick={() => investJar(wcAccount.id)} style={{ marginTop: 8, width: "100%", justifyContent: "center", background: C.teal }}>
+          Invest ₹{plan.a} → {nameOf(wc.fundAId)}{plan.b ? ` + ₹${plan.b} → ${nameOf(wc.fundBId)}` : ""}
+        </button>
+      )}
+      {!plan && wc.fundAId && (+wcAccount.balance || 0) > 0 && (
+        <div className="sub" style={{ marginTop: 8 }}>{inr((+wc.investLot || 500) - ((+wcAccount.balance || 0) % (+wc.investLot || 500)))} more and it's time to invest.</div>
+      )}
+      {!wc.fundAId && (+wcAccount.balance || 0) > 0 && (
+        <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
+      )}
+      {hist.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          {hist.map((h, i) => (
+            <div key={i} className="row" style={{ justifyContent: "space-between", fontSize: 12.5, color: C.muted, padding: "3px 0" }}>
+              <span>{h.date}{h.topUp ? " · top-up" : h.comments !== undefined ? ` · ${fmt((+h.comments || 0) + (+h.shares || 0) + (+h.saves || 0))} engagements` : h.views !== undefined ? ` · ${fmt(h.views)} views` : ""}</span><span className="num" style={{ color: C.text }}>+₹{h.amount}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+  const wcAccount = accounts.find(a => a.warChest?.on);
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {wcAccount && <JarCard {...{ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab }} />}
       <div className="card" style={{ background: C.surface2 }}>
         <div className="lbl">Safe to spend right now</div>
         {!settings.seenSafeToSpendIntro && (
@@ -990,10 +1114,10 @@ function AccountForm({ onSave, onCancel }) {
       <div className="row" style={{ gap: 8 }}>
         <input className="in num" type="number" placeholder="Balance" value={f.balance || ""} onChange={e => setF({ ...f, balance: +e.target.value })} style={{ flex: 1 }} />
       </div>
-      <div className="row" style={{ gap: 6 }}>{Object.keys(PURPOSE).map(p => (
-        <button key={p} className="btn ghost" onClick={() => setF({ ...f, purpose: p })} style={{ flex: 1, padding: "8px 6px", fontSize: 12, borderColor: f.purpose === p ? PURPOSE[p].color : C.line, color: f.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>{Object.keys(PURPOSE).map(p => (
+        <button key={p} className="btn ghost" onClick={() => setF({ ...f, purpose: p })} style={{ flex: "1 1 40%", padding: "8px 6px", fontSize: 12, borderColor: f.purpose === p ? PURPOSE[p].color : C.line, color: f.purpose === p ? PURPOSE[p].color : C.muted }}>{PURPOSE[p].label}</button>
       ))}</div>
-      <button className="btn" disabled={!f.name} onClick={() => onSave(f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
+      <button className="btn" disabled={!f.name} onClick={() => onSave(f.purpose === "grow" ? { ...f, invested: +f.balance || 0, valuedOn: localDay() } : f)} style={{ opacity: f.name ? 1 : 0.5 }}>Save</button>
     </div>
   );
 }
@@ -1015,7 +1139,7 @@ function MoveForm({ accounts, onMove, onCancel }) {
   );
 }
 
-function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses = [], onCelebrate, settings, setSettings, safeToSpend }) {
+function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses = [], onCelebrate, settings, setSettings, safeToSpend, planExtra = null }) {
   const [adding, setAdding] = useState(false);
   const [payFor, setPayFor] = useState(null);
   const [settleFor, setSettleFor] = useState(null);
@@ -1035,13 +1159,13 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
     })));
   }
   const strategy = settings.payoffStrategy || "avalanche";
-  const extra = settings.extraMonthly || 0;
+  const extra = planExtra ?? (settings.extraMonthly || 0);
   const suggestedExtra = Math.max(0, Math.round((safeToSpend || 0) - (+settings.buffer || 0)));
   const plan = useMemo(() => buildPayoffPlan(oblig, +extra || 0, strategy), [oblig, extra, strategy]);
   // Same plan, with a bit more thrown at it each month — answers "what if I added ₹X more?"
   // without having to manually change the extra field and remember what the date used to be.
   const deltaPlan = useMemo(() => buildPayoffPlan(oblig, (+extra || 0) + (+deltaExtra || 0), strategy), [oblig, extra, deltaExtra, strategy]);
-  const add = (o) =>{ setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open" }]); setAdding(false); };
+  const add = (o) =>{ setOblig(x => [...x, { ...o, id: crypto.randomUUID(), paid: 0, status: "open", addedOn: localDay() }]); setAdding(false); };
   const upd = (id, p) => setOblig(x => x.map(o => o.id === id ? { ...o, ...p } : o));
   const rm = (id) => {
     setOblig(x => x.filter(o => o.id !== id));
@@ -1223,6 +1347,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                     {(o.status === "closed" || o.status === "settled") && <Check size={15} color={C.teal} />}{o.name}
                     {o.priority != null && <span className="chip" style={{ background: C.violet, color: "#fff" }}>your priority</span>}
                     {od.overdue && <span className="chip" style={{ background: C.coral, color: "#fff" }}>overdue{od.daysLate ? " " + od.daysLate + "d" : ""}</span>}
+                    {od.startsOn && <span className="chip" style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted }}>starts {new Date(od.startsOn + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>}
                     {!od.overdue && od.cardDue && <span className="chip" style={{ background: "transparent", border: "1px solid " + C.line, color: C.muted }}>due {new Date(od.cardDue + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>}
                     {o.cibilImpact && <span className="chip" style={{ background: C.amber, color: "#fff" }}>hits CIBIL</span>}
                     {o.harassment && <span className="chip" style={{ background: C.coral, color: "#fff" }}>frequent calls</span>}
@@ -1326,6 +1451,11 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
                       {t === "regulated" && (
                         <button className="chip" onClick={() => upd(o.id, { isCreditCard: !o.isCreditCard })} style={{ background: "transparent", border: "1px solid " + (o.isCreditCard ? C.violet : C.line), color: o.isCreditCard ? C.violet : C.muted, cursor: "pointer" }}>{o.isCreditCard ? "✓ credit card" : "mark as credit card"}</button>
                       )}
+                      {t !== "family" && !o.isCreditCard && (
+                        <label className="row" style={{ gap: 6, fontSize: 12, color: C.muted, width: "100%" }}>Repayments start on
+                          <input className="in" type="date" style={{ padding: "5px 8px", fontSize: 12, width: "auto" }} value={o.startsOn || ""} onChange={e => upd(o.id, { startsOn: e.target.value })} />
+                        </label>
+                      )}
                       {o.isCreditCard && (
                         <label className="row" style={{ gap: 6, fontSize: 12, color: C.muted, width: "100%" }}>Next payment due
                           <input className="in" type="date" style={{ padding: "5px 8px", fontSize: 12, width: "auto" }} value={o.nextDue || ""} onChange={e => upd(o.id, { nextDue: e.target.value })} />
@@ -1385,6 +1515,9 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
             </button>
           </div>
           <span className="lbl">Extra you can put toward debt each month</span>
+          {planExtra != null ? (
+            <div className="panel"><span className="num" style={{ fontSize: 18 }}>{inr(planExtra)}</span> <span className="sub">a month — from your salary plan (change it there)</span></div>
+          ) : (
           <div className="row" style={{ gap: 8 }}>
             <input className="in num" type="number" placeholder="0" value={settings.extraMonthly || ""}
               onChange={e => setSettings(s => ({ ...s, extraMonthly: +e.target.value }))} style={{ flex: 1 }} />
@@ -1394,6 +1527,7 @@ function Clear({ oblig, setOblig, accounts, setAccounts, payments, setPayments, 
               </button>
             )}
           </div>
+          )}
           <div style={{ marginTop: 12 }}>
             {plan.order.length === 0 ? (
               <div className="foot">Add an APR to each debt above (0 for family & friends — open "Edit" on each one) to see a payoff timeline.</div>
@@ -1695,18 +1829,21 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
     <div style={{ display: "grid", gap: 14 }}>
       <div className="card hero">
         <div className="lbl">This month</div>
-        <div className="row" style={{ gap: 10, marginTop: 2, alignItems: "flex-start" }}>
-          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap", color: C.teal }}>+{inr(monthIn)}</div><div className="sub">came in</div></div>
-          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap" }}>−{inr(monthOut)}</div><div className="sub">went out</div></div>
-          <div style={{ flex: 1 }}><div className="num" style={{ fontSize: 20, whiteSpace: "nowrap", color: monthIn - monthOut >= 0 ? C.teal : C.coral }}>{monthIn - monthOut >= 0 ? "" : "−"}{inr(Math.abs(monthIn - monthOut))}</div><div className="sub">left</div></div>
-        </div>
-        <div className="split" style={{ marginTop: 14 }}>
-          <div style={{ width: (monthOut ? (monthSpend / monthOut) * 100 : 50) + "%", background: C.amber }} />
-          <div style={{ width: (monthOut ? (monthRepaid / monthOut) * 100 : 50) + "%", background: C.violet }} />
-        </div>
-        <div className="row" style={{ justifyContent: "space-between", marginTop: 8, fontSize: 12.5 }}>
-          <span><span className="dot" style={{ background: C.amber }} />Everyday {inr(monthSpend)}{trend !== null && <span style={{ color: trend > 0 ? C.coral : C.teal }}> · {trend > 0 ? "+" : ""}{trend}% vs same days last month</span>}</span>
-          <span><span className="dot" style={{ background: C.violet }} />Repayments {inr(monthRepaid)}</span>
+        {/* One row per figure — easier to read than three competing totals. */}
+        <div style={{ display: "grid", gap: 10, marginTop: 4 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+            <span><span className="dot" style={{ background: C.amber }} />Everyday spending</span>
+            <span className="num" style={{ fontSize: 22 }}>{inr(monthSpend)}</span>
+          </div>
+          {trend !== null && <div className="sub" style={{ marginTop: -8, paddingLeft: 14, color: trend > 0 ? C.coral : C.teal }}>{trend > 0 ? "+" : ""}{trend}% vs the same days last month</div>}
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+            <span><span className="dot" style={{ background: C.violet }} />Debt repaid</span>
+            <span className="num" style={{ fontSize: 22, color: C.violet }}>{inr(monthRepaid)}</span>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+            <span><span className="dot" style={{ background: C.teal }} />Came in</span>
+            <span className="num" style={{ fontSize: 22, color: C.teal }}>{inr(monthIn)}</span>
+          </div>
         </div>
         {budget > 0 && !budgetEdit ? (
           <div style={{ marginTop: 14 }}>
@@ -1944,7 +2081,10 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
   const [open, setOpen] = useState(null);      // account id for the detail sheet
   const [mode, setMode] = useState(null);      // 'move' | 'pickUpdate' | 'add'
   const monthIn = sum(incomes.filter(i => (i.date || "").slice(0, 7) === localMonth()), i => i.amount);
-  const byPurpose = Object.keys(PURPOSE).map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
+  const byPurpose = Object.keys(PURPOSE).filter(p => p !== "grow").map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
+  const growing = accounts.filter(isGrow);
+  const growNow = sum(growing, a => a.balance), growIn = sum(growing, putIn), growGain = growNow - growIn;
+  const spendable = accounts.filter(a => !isGrow(a));
   const positive = byPurpose.reduce((s, x) => s + Math.max(0, x.total), 0);
   const acc = accounts.find(a => a.id === open);
   return (
@@ -1963,6 +2103,34 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
         <div className="sub" style={{ marginTop: 10 }}>{inr(monthIn)} came in this month</div>
       </div>
 
+      {growing.length > 0 && (
+        <div className="card">
+          <div className="lbl">Savings & investments</div>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+            <div className="num" style={{ fontSize: 28 }}>{inr(growNow)}</div>
+            <span className="num" style={{ fontSize: 14, color: growGain >= 0 ? C.teal : C.coral }}>{growGain >= 0 ? "+" : "−"}{inr(Math.abs(growGain))}</span>
+          </div>
+          <div className="sub">{inr(growIn)} put in · not counted in money in hand</div>
+          <div style={{ marginTop: 8 }}>
+            {growing.map(a => {
+              const g = (+a.balance || 0) - putIn(a);
+              return (
+                <button key={a.id} className="li li-btn" onClick={() => setOpen(a.id)}>
+                  <div style={{ textAlign: "left" }}>
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>{a.name}</div>
+                    <div className="sub" style={{ marginTop: 2 }}>{inr(putIn(a))} put in{a.valuedOn ? ` · value checked ${a.valuedOn}` : ""}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="num" style={{ fontSize: 17 }}>{inr(a.balance)}</div>
+                    <div className="num" style={{ fontSize: 12, color: g >= 0 ? C.teal : C.coral }}>{g >= 0 ? "+" : "−"}{inr(Math.abs(g))}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="row" style={{ gap: 8 }}>
         <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => openQuickAdd("in")}><Plus size={16} /> Add income</button>
         {accounts.length >= 2 && <button className="btn ghost" style={{ flex: 1, justifyContent: "center" }} onClick={() => setMode("move")}><ArrowRightLeft size={16} /> Move</button>}
@@ -1971,14 +2139,14 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
 
       <div className="card" style={{ padding: "6px 16px" }}>
         {accounts.length === 0 && <Empty>No accounts yet — add the places you hold money.</Empty>}
-        {accounts.map(a => (
+        {spendable.map(a => (
           <button key={a.id} className="li li-btn" onClick={() => setOpen(a.id)}>
             <div style={{ textAlign: "left" }}>
               <div style={{ fontSize: 15, fontWeight: 600 }}>{a.name}</div>
               <div className="row" style={{ gap: 6, marginTop: 3 }}>
                 {a.purpose && <span className="tag" style={{ color: PURPOSE[a.purpose].color, borderColor: PURPOSE[a.purpose].color }}>{PURPOSE[a.purpose].short}</span>}
                 {a.isCash && <span className="tag">💵 Cash</span>}
-                {a.warChest?.on && <span className="tag">War chest</span>}
+                {a.warChest?.on && <span className="tag">{isEngage(a.warChest) ? "Engagement jar" : "Jar"}</span>}
               </div>
             </div>
             <span className="num" style={{ fontSize: 19, color: (+a.balance || 0) < 0 ? C.coral : C.text }}>{(+a.balance || 0) < 0 ? "−" : ""}{inr(Math.abs(+a.balance || 0))}</span>
@@ -1989,8 +2157,8 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
 
       {mode === "move" && (
         <Sheet title="Move money" onClose={() => setMode(null)}>
-          <MoveForm accounts={accounts} onMove={(from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, balance: (+a.balance || 0) + amt } : a)); setMode(null); }} onCancel={() => setMode(null)} />
-          <div className="foot">For ATM withdrawals too (bank → cash). Moving money isn't spending, so it doesn't show up in Money.</div>
+          <MoveForm accounts={accounts} onMove={(from, to, amt) => { setAccounts(x => x.map(a => a.id === from ? { ...a, ...growAfterMove(a, -amt), balance: (+a.balance || 0) - amt } : a.id === to ? { ...a, ...growAfterMove(a, amt), balance: (+a.balance || 0) + amt } : a)); setMode(null); }} onCancel={() => setMode(null)} />
+          <div className="foot">For ATM withdrawals too (bank → cash), and for putting money into a fund or taking it out. Moving money isn't spending, so it doesn't show up in Money.</div>
         </Sheet>
       )}
       {mode === "pickUpdate" && (
@@ -2018,9 +2186,11 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
   const upd = (p) => setAccounts(x => x.map(y => y.id === a.id ? { ...y, ...p } : y));
   const cur = +a.balance || 0;
   const diff = actual === null || actual === "" ? 0 : (+actual - cur);
+  const grow = isGrow(a);
   function applyUpdate() {
     if (actual === "" || actual === null) return;
     const target = +actual;
+    if (grow) { upd({ balance: target, valuedOn: localDay(), invested: putIn(a) }); setActual(null); return; } // a fund's value moving isn't spending or income
     if (how === "spend" && diff < 0) logExpense({ amount: -diff, cat: "Other", note: "balance correction", accountId: "" });
     if (how === "income" && diff > 0) logIncome({ amount: diff, source: "Other", note: "balance correction", accountId: "" });
     upd({ balance: target });
@@ -2029,17 +2199,30 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
   return (
     <Sheet title={a.name} onClose={onClose}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-        <span className="sub">Balance in the app</span>
+        <span className="sub">{grow ? "Worth now" : "Balance in the app"}</span>
         <span className="num" style={{ fontSize: 26, color: cur < 0 ? C.coral : C.text }}>{cur < 0 ? "−" : ""}{inr(Math.abs(cur))}</span>
       </div>
+      {grow && (
+        <div className="panel" style={{ display: "grid", gap: 6 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="sub">Put in so far</span>
+            <input className="in num" style={{ width: 130, textAlign: "right" }} type="number" value={putIn(a)} onChange={e => upd({ invested: +e.target.value })} />
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="sub">Gain</span>
+            <span className="num" style={{ color: cur - putIn(a) >= 0 ? C.teal : C.coral }}>{cur - putIn(a) >= 0 ? "+" : "−"}{inr(Math.abs(cur - putIn(a)))}</span>
+          </div>
+          <div className="foot">Money you move in (or invest from the jar) adds to "put in" automatically. Tap Update value when you check the fund app{a.valuedOn ? ` — last checked ${a.valuedOn}` : ""}.</div>
+        </div>
+      )}
 
       {actual === null ? (
-        <button className="btn" style={{ justifyContent: "center" }} onClick={() => setActual("")}>Update balance</button>
+        <button className="btn" style={{ justifyContent: "center" }} onClick={() => setActual("")}>{grow ? "Update value" : "Update balance"}</button>
       ) : (
         <div className="panel">
-          <span className="lbl">What does {a.name} actually have right now?</span>
+          <span className="lbl">{grow ? `What is ${a.name} worth right now?` : `What does ${a.name} actually have right now?`}</span>
           <input className="in num big" type="number" inputMode="decimal" autoFocus value={actual} onChange={e => setActual(e.target.value)} placeholder="₹ 0" />
-          {actual !== "" && diff !== 0 && (
+          {!grow && actual !== "" && diff !== 0 && (
             <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
               <div className="sub">That's {diff > 0 ? "₹" + Math.abs(diff).toLocaleString("en-IN") + " more" : "₹" + Math.abs(diff).toLocaleString("en-IN") + " less"} than the app shows.</div>
               <Pill on={how === "set"} onClick={() => setHow("set")}>Just correct the balance</Pill>
@@ -2058,19 +2241,45 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
       <input className="in" value={name} onChange={e => setName(e.target.value)} onBlur={() => name.trim() && name !== a.name && upd({ name: name.trim() })} />
       <span className="lbl">What this account is for</span>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-        {Object.keys(PURPOSE).map(p => <Pill key={p} on={a.purpose === p} color={PURPOSE[p].color} onClick={() => upd({ purpose: p })}>{PURPOSE[p].label}</Pill>)}
+        {Object.keys(PURPOSE).map(p => <Pill key={p} on={a.purpose === p} color={PURPOSE[p].color} onClick={() => upd({ purpose: p, ...(p === "grow" && a.invested === undefined ? { invested: +a.balance || 0 } : {}) })}>{PURPOSE[p].label}</Pill>)}
       </div>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         <Pill on={!!a.isCash} color={C.teal} onClick={() => upd({ isCash: !a.isCash })}>💵 Physical cash</Pill>
-        <Pill on={!!a.warChest?.on} color={C.violet} onClick={() => upd({ warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}>War chest</Pill>
+        <Pill on={!!a.warChest?.on} color={C.violet} onClick={() => upd({ warChest: a.warChest?.on ? { ...a.warChest, on: false } : { target: 10, cadence: "daily", vpa: "", fromAccountId: accounts.find(x => x.id !== a.id)?.id || "", streak: 0, lastLoggedDate: "", ...(a.warChest || {}), on: true } })}>Jar</Pill>
       </div>
       {a.warChest?.on && (
         <div className="panel" style={{ display: "grid", gap: 8 }}>
-          <div className="sub">Small, steady amounts set aside here for friends & family repayments.</div>
+          <div className="sub">Small, steady amounts set aside here, then moved into your funds.</div>
+          <Seg options={[["fixed", "Fixed amount"], ["engage", "Base + engagement"]]} value={isEngage(a.warChest) ? "engage" : "fixed"}
+            onChange={(v) => upd({ warChest: { ...a.warChest, mode: v, ...(v === "engage" ? { cadence: "daily", base: a.warChest.base ?? 25, perAction: a.warChest.perAction ?? 1, dailyCap: a.warChest.dailyCap || 100 } : {}) } })} />
+          {!isEngage(a.warChest) ? (
+            <div className="row" style={{ gap: 8 }}>
+              <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
+              <Seg options={[["daily", "per day"], ["weekly", "per week"]]} value={a.warChest.cadence} onChange={(v) => upd({ warChest: { ...a.warChest, cadence: v } })} />
+            </div>
+          ) : (
+            <div className="row" style={{ gap: 8 }}>
+              <div style={{ flex: 1 }}><span className="lbl">Daily base ₹</span>
+                <input className="in num" type="number" value={a.warChest.base ?? 25} onChange={e => upd({ warChest: { ...a.warChest, base: +e.target.value } })} /></div>
+              <div style={{ flex: 1 }}><span className="lbl">₹ per comment / share / save</span>
+                <input className="in num" type="number" value={a.warChest.perAction ?? 1} onChange={e => upd({ warChest: { ...a.warChest, perAction: +e.target.value } })} /></div>
+              <div style={{ flex: 1 }}><span className="lbl">Daily cap ₹</span>
+                <input className="in num" type="number" value={a.warChest.dailyCap ?? 100} onChange={e => upd({ warChest: { ...a.warChest, dailyCap: +e.target.value } })} /></div>
+            </div>
+          )}
+          <span className="lbl" style={{ marginTop: 4 }}>Invest into (add each fund as an account first)</span>
           <div className="row" style={{ gap: 8 }}>
-            <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
-            <Seg options={[["daily", "per day"], ["weekly", "per week"]]} value={a.warChest.cadence} onChange={(v) => upd({ warChest: { ...a.warChest, cadence: v } })} />
+            <select className="in" style={{ flex: 2 }} value={a.warChest.fundAId || ""} onChange={e => upd({ warChest: { ...a.warChest, fundAId: e.target.value } })}>
+              <option value="">Main fund…</option>
+              {accounts.filter(x => x.id !== a.id).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <input className="in num" style={{ flex: 1 }} type="number" title="Main fund share %" value={Math.round((a.warChest.fundAShare ?? 0.8) * 100)} onChange={e => upd({ warChest: { ...a.warChest, fundAShare: Math.min(100, Math.max(0, +e.target.value)) / 100 } })} />
           </div>
+          <select className="in" value={a.warChest.fundBId || ""} onChange={e => upd({ warChest: { ...a.warChest, fundBId: e.target.value } })}>
+            <option value="">Second fund (optional)…</option>
+            {accounts.filter(x => x.id !== a.id && x.id !== a.warChest.fundAId).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+          <div className="sub">The jar is invested in whole ₹{a.warChest.investLot || 500} lots, {Math.round((a.warChest.fundAShare ?? 0.8) * 100)}% to the main fund and the rest to the second.</div>
           {accounts.length > 1 && (
             <select className="in" value={a.warChest.fromAccountId || ""} onChange={e => upd({ warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
               <option value="">Comes out of…</option>
@@ -2091,7 +2300,8 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
 function buildSalaryPlan({ plan, oblig, accounts, expenses }) {
   const salary = +plan.salary || 0;
   const open = oblig.filter(o => o.status !== "closed" && o.status !== "settled" && (+o.outstanding || 0) > 0);
-  const dues = open.filter(o => +o.monthly > 0).map(o => ({ id: o.id, name: o.name.trim(), amount: Math.min(+o.monthly, +o.outstanding), type: o.type }));
+  const monthEnd = localDay(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0));
+  const dues = open.filter(o => +o.monthly > 0 && !notStartedYet(o, monthEnd)).map(o => ({ id: o.id, name: o.name.trim(), amount: Math.min(+o.monthly, +o.outstanding), type: o.type }));
   const duesTotal = sum(dues, d => d.amount);
   const livingSuggested = recentLivingAverage(expenses);
   const living = plan.living !== undefined && plan.living !== "" ? +plan.living : livingSuggested;
@@ -2334,6 +2544,15 @@ function SettingsSheet({ settings, setSettings, notif, askNotif, exportData, imp
         </div>
         <input type="range" min={0} max={10000} step={100} value={Math.min(10000, +settings.buffer || 0)} onChange={e => setSettings(s => ({ ...s, buffer: +e.target.value }))} style={{ width: "100%", accentColor: C.primary, marginTop: 8 }} />
         <div className="sub">Taken off "safe to spend" on Home, so there's always a little left.</div>
+      </div>
+
+      <div>
+        <span className="lbl">Your starting line</span>
+        <div className="sub" style={{ marginBottom: 8 }}>What you owed in total on the day you start measuring from — the Clearing Log shows how much of it is gone.</div>
+        <div className="row" style={{ gap: 8 }}>
+          <input className="in" type="date" style={{ flex: 1 }} value={(settings.baseline || {}).date || ""} onChange={e => setSettings(s => ({ ...s, baseline: { ...(s.baseline || {}), date: e.target.value } }))} />
+          <input className="in num" type="number" inputMode="numeric" style={{ flex: 1 }} placeholder="Total owed" value={(settings.baseline || {}).total || ""} onChange={e => setSettings(s => ({ ...s, baseline: { ...(s.baseline || {}), total: +e.target.value } }))} />
+        </div>
       </div>
 
       <div>

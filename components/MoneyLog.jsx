@@ -51,7 +51,6 @@ export function quoteFor(dateStr, custom = []) {
 
 // ---------- data ----------
 export function buildSnapshot({ date, expenses, payments, incomes, oblig, sourceLabel, budget = 0, includeLoans = true, showIncome = true }) {
-  if (!includeLoans) payments = [];
   const month = date.slice(0, 7);
   const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
   const debtName = (id) => ((oblig || []).find(o => o.id === id) || {}).name || "a debt";
@@ -60,10 +59,12 @@ export function buildSnapshot({ date, expenses, payments, incomes, oblig, source
     ...(payments || []).filter(p => p.date === date && net(p) > 0).map(p => ({ label: "Paid " + debtName(p.obligId).trim(), note: "", amount: net(p), cat: "Loan repayments" })),
   ].sort((a, b) => b.amount - a.amount);
   const monthExp = (expenses || []).filter(e => (e.date || "").slice(0, 7) === month && e.date <= date);
+  // Debt repayments are always shown, but kept separate from everyday spending: they'd otherwise
+  // swamp the chart (a single loan closure can be lakhs) and hide where everyday money goes.
   const monthPaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === month && p.date <= date).reduce((s, p) => s + net(p), 0);
+  const todayPaid = (payments || []).filter(p => p.date === date).reduce((s, p) => s + net(p), 0);
   const byCat = {};
   monthExp.forEach(e => { const c = e.cat || "Other"; byCat[c] = (byCat[c] || 0) + (+e.amount || 0); });
-  if (monthPaid > 0) byCat["Loan repayments"] = monthPaid;
   const cats = Object.entries(byCat).map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value);
   // Keep the legend readable: top 6 categories, the rest folded into "Everything else".
   const slices = cats.length > 7 ? [...cats.slice(0, 6), { label: "Everything else", value: cats.slice(6).reduce((s, x) => s + x.value, 0) }] : cats;
@@ -76,8 +77,9 @@ export function buildSnapshot({ date, expenses, payments, incomes, oblig, source
   const monthLiving = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
   return {
     date, todayItems,
-    todayTotal: todayItems.reduce((s, x) => s + x.amount, 0),
+    todayTotal: todayItems.filter(x => x.cat !== "Loan repayments").reduce((s, x) => s + x.amount, 0),
     monthTotal: cats.reduce((s, x) => s + x.value, 0),
+    todayPaid, monthPaid,
     slices, sources,
     inTotal: sources.reduce((s, x) => s + x.value, 0),
     budget: +budget || 0, budgetLeft: (+budget || 0) - monthLiving,
@@ -248,6 +250,8 @@ export function drawMoneyLog(canvas, snap, { dayNumber, quote, hide = false, tit
   text(ctx, HIDE ? "CATEGORIES TODAY" : "SPENT TODAY", Rx + colW / 2, r1 + 106, { size: 28, align: "center", color: INK_SOFT });
   text(ctx, HIDE ? String(snap.noSpendDays) : money(snap.monthTotal), L + colW / 2, r1 + 176, { size: 68, weight: 700, align: "center", maxW: colW - 30 });
   text(ctx, HIDE ? String(snap.todayCats.length) : money(snap.todayTotal), Rx + colW / 2, r1 + 176, { size: 68, weight: 700, align: "center", maxW: colW - 30 });
+  if (!HIDE && snap.monthPaid > 0) text(ctx, `+ ${inr(snap.monthPaid)} debt repaid`, L + colW / 2, r1 + 232, { size: 28, weight: 700, align: "center", color: "#6B5B8E", maxW: colW });
+  if (!HIDE && snap.todayPaid > 0) text(ctx, `+ ${inr(snap.todayPaid)} debt repaid`, Rx + colW / 2, r1 + 232, { size: 28, weight: 700, align: "center", color: "#6B5B8E", maxW: colW });
 
   // Bottom-up: quote, then the one-line extra (came in / budget), then the chart.
   const qm = measureQuote(ctx, quote, L, R);
@@ -257,7 +261,7 @@ export function drawMoneyLog(canvas, snap, { dayNumber, quote, hide = false, tit
   let pieH = snap.slices.length ? 300 : 0;
 
   // Entries
-  const listTop = r1 + 262;
+  const listTop = r1 + ((!HIDE && (snap.monthPaid > 0 || snap.todayPaid > 0)) ? 292 : 262);
   const rowsFor = (pie) => (extraY - (hasExtra ? 40 : 10) - pie - (pie ? 24 : 0)) - (listTop + 50);
   const rows = snap.todayCats.map(c => ({ label: c.label + (c.count > 1 ? ` (${c.count})` : ""), cat: c.cat, amountText: HIDE ? "" : plain(c.amount) }));
   const n = Math.max(1, rows.length);
@@ -309,6 +313,287 @@ export function drawMoneyLog(canvas, snap, { dayNumber, quote, hide = false, tit
   footer(ctx, L, R, H - 150, `DAY ${dayStr} / ∞`);
 }
 
+// ---------- jar log (jar-first daily frame) ----------
+// A dark, bold Reel frame: the jar balance leads, then what went in today, then one line each
+// for spent, debt left and invested. Everything sits inside Instagram Reels' safe area (clear of
+// the side buttons and the caption), so the same image works as a Story too.
+const J = {
+  BG: "#0D1220", SURF: "#171F33", LINE: "#262F47", TXT: "#F2F3F7", MUTED: "#8B92AC",
+  GOLD: "#F2B544", GREEN: "#6FD39A", CORAL: "#FF7B6B",
+};
+export const JAR_FONTS = ['800 60px "Bricolage Grotesque"', '700 40px "Bricolage Grotesque"', '500 30px "Bricolage Grotesque"', '500 30px "DM Mono"'];
+const JD = (s, w = 800) => `${w} ${s}px "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif`;
+const JM = (s, w = 500) => `${w} ${s}px "DM Mono", ui-monospace, Menlo, monospace`;
+function jt(ctx, s, x, y, font, color, align = "left", maxW, spacing = 0) {
+  ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "alphabetic";
+  if ("letterSpacing" in ctx) ctx.letterSpacing = spacing + "px";
+  if (maxW) { let size = parseFloat(font.match(/(\d+(\.\d+)?)px/)[1]); while (ctx.measureText(s).width > maxW && size > 20) { size -= 4; ctx.font = font.replace(/\d+(\.\d+)?px/, size + "px"); } }
+  ctx.fillText(s, x, y);
+  if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
+}
+function jarBackground(ctx) {
+  ctx.fillStyle = J.BG; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(830, 520, 20, 830, 520, 620);
+  g.addColorStop(0, "rgba(242,181,68,.20)"); g.addColorStop(1, "rgba(242,181,68,0)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(255,255,255,.035)";
+  for (let y = 40; y < H; y += 36) for (let x = 40; x < W; x += 36) { ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill(); }
+}
+// Glass jar meter, filled to how close the balance is to the next invest lot.
+function jarMeter(ctx, x, y, w, h, fill, lot) {
+  const lidH = 34, neckH = 26, top = y + lidH + neckH, bodyH = h - lidH - neckH;
+  ctx.fillStyle = J.GOLD; roundRect(ctx, x + 18, y, w - 36, lidH, 10); ctx.fill();
+  ctx.fillStyle = J.BG; for (let i = 1; i < 6; i++) ctx.fillRect(x + 18 + i * (w - 36) / 6, y + 6, 3, lidH - 12);
+  ctx.strokeStyle = "rgba(242,243,247,.55)"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(x + 28, y + lidH); ctx.lineTo(x + 28, top + 6); ctx.moveTo(x + w - 28, y + lidH); ctx.lineTo(x + w - 28, top + 6); ctx.stroke();
+  const f = Math.max(0, Math.min(1, fill));
+  ctx.save(); roundRect(ctx, x, top, w, bodyH, 44); ctx.clip();
+  ctx.fillStyle = "rgba(255,255,255,.04)"; ctx.fillRect(x, top, w, bodyH);
+  if (f > 0) {
+    const lvl = top + bodyH * (1 - f);
+    const g = ctx.createLinearGradient(0, lvl, 0, top + bodyH); g.addColorStop(0, "#FFD27A"); g.addColorStop(1, "#E08E1B");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x, lvl);
+    for (let i = 0; i <= w; i += 6) ctx.lineTo(x + i, lvl + Math.sin(i / 18) * 5);
+    ctx.lineTo(x + w, top + bodyH); ctx.lineTo(x, top + bodyH); ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle = "rgba(13,18,32,.35)"; ctx.lineWidth = 3;
+  for (let i = 1; i < 5; i++) { const ty = top + bodyH * (1 - i / 5); ctx.beginPath(); ctx.moveTo(x + w - 40, ty); ctx.lineTo(x + w, ty); ctx.stroke(); }
+  ctx.fillStyle = "rgba(255,255,255,.14)"; roundRect(ctx, x + 18, top + 26, 16, bodyH * 0.55, 8); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = "rgba(242,243,247,.7)"; ctx.lineWidth = 5; roundRect(ctx, x, top, w, bodyH, 44); ctx.stroke();
+  jt(ctx, inr(lot), x + w / 2, y - 22, JM(26), J.MUTED, "center");
+}
+
+// What the jar frame needs for one day. A day can have the daily entry (base + engagement) and
+// any number of top-ups; money moved into the funds that day shows as its own banner.
+export function buildJarSnapshot({ date, jar, spentToday, paidToday = 0, debtLeft = 0 }) {
+  const hist = ((jar && jar.history) || []).filter(h => h.date === date);
+  const entry = hist.find(h => !h.topUp) || null;
+  const topUp = hist.filter(h => h.topUp).reduce((t, h) => t + (+h.amount || 0), 0);
+  const invested = ((jar && jar.invested) || []);
+  const inv = invested.filter(x => x.date === date).reduce((t, x) => ({ a: t.a + (+x.a || 0), b: t.b + (+x.b || 0) }), { a: 0, b: 0 });
+  return {
+    date, entry, topUp,
+    lot: +(jar && jar.lot) || 500,
+    balance: Math.max(0, +(jar && jar.balance) || 0),
+    base: entry ? (entry.base ?? (entry.comments === undefined ? +entry.amount || 0 : 0)) : 0,
+    comments: entry ? +entry.comments || 0 : 0,
+    shares: entry ? +entry.shares || 0 : 0,
+    saves: entry ? +entry.saves || 0 : 0,
+    perAction: +(jar && jar.perAction) || 1,
+    inToday: (entry ? +entry.amount || 0 : 0) + topUp,
+    spentToday: +spentToday || 0, paidToday: +paidToday || 0, debtLeft: +debtLeft || 0,
+    investA: inv.a, investB: inv.b,
+    investedTotal: invested.filter(x => x.date <= date).reduce((t, x) => t + (+x.a || 0) + (+x.b || 0), 0),
+    fundA: (jar && jar.fundAName) || "Fund 1", fundB: (jar && jar.fundBName) || "Fund 2",
+  };
+}
+
+export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@financiallyclueless.in" }) {
+  HIDE = hide;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  jarBackground(ctx);
+  const L = 80, R = 940;
+
+  // meta row
+  jt(ctx, `DAY ${String(dayNumber).padStart(2, "0")}`, L, 250, JM(34), J.GOLD, "left", null, 6);
+  const d = new Date(s.date + "T00:00:00");
+  jt(ctx, d.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short" }).toUpperCase(), R, 250, JM(28), J.MUTED, "right", null, 4);
+  ctx.fillStyle = J.LINE; ctx.fillRect(L, 280, R - L, 2);
+
+  // hero: the jar
+  const into = s.balance % s.lot, invested = s.investA + s.investB;
+  jarMeter(ctx, 760, 360, 180, 440, into / s.lot, s.lot);
+  jt(ctx, "IN THE JAR", L, 360, JM(28), J.MUTED, "left", null, 5);
+  jt(ctx, inr(s.balance), L - 6, 560, JD(230), J.TXT, "left", 650);
+  jt(ctx, s.inToday > 0 ? `+${inr(s.inToday)} today` : "not logged yet", L, 640, JD(56, 700), s.inToday > 0 ? J.GREEN : J.MUTED);
+  if (invested) {
+    roundRect(ctx, L, 690, 640, 118, 22); ctx.fillStyle = J.GOLD; ctx.fill();
+    jt(ctx, `${inr(invested)} INVESTED TODAY`, L + 28, 740, JD(40), J.BG, "left", 590);
+    jt(ctx, `${inr(s.investA)} ${s.fundA}${s.investB ? `  ·  ${inr(s.investB)} ${s.fundB}` : ""}`, L + 28, 786, JM(26), J.BG, "left", 590);
+  } else {
+    jt(ctx, `${inr(s.lot - into)} to go before it's invested`, L, 720, JD(40, 500), J.MUTED, "left", 640);
+  }
+
+  // what went in: tiles (a top-up takes the place of the saves tile's neighbour when there is one)
+  jt(ctx, "WHAT WENT IN", L, 890, JM(26), J.MUTED, "left", null, 5);
+  const pl = (n, w) => `${n} ${w}${n === 1 ? "" : "S"}`;
+  const tiles = [["BASE", s.base], [pl(s.comments, "COMMENT"), s.comments * s.perAction], [pl(s.shares, "SHARE"), s.shares * s.perAction], [pl(s.saves, "SAVE"), s.saves * s.perAction]];
+  if (s.topUp > 0) tiles.push(["TOP-UP", s.topUp]);
+  const n = tiles.length, gap = 16, tw = (R - L - (n - 1) * gap) / n;
+  tiles.forEach(([label, v], i) => {
+    const x = L + i * (tw + gap);
+    roundRect(ctx, x, 916, tw, 150, 22); ctx.fillStyle = i > 0 && v > 0 ? "rgba(111,211,154,.14)" : J.SURF; ctx.fill();
+    jt(ctx, "+" + Math.round(v), x + tw / 2, 1000, JD(n > 4 ? 54 : 64), v > 0 ? J.TXT : J.MUTED, "center", tw - 16);
+    jt(ctx, label, x + tw / 2, 1042, JM(20), J.MUTED, "center", tw - 16, 2);
+  });
+
+  // ledger: spent, debt left (with today's repayment), invested so far
+  const rows = [
+    ["Spent today", s.spentToday > 0 ? money(s.spentToday) : "₹0", J.TXT, ""],
+    ["Debt left", money(s.debtLeft), J.CORAL, s.paidToday > 0 ? `↓ ${money(s.paidToday)} paid today` : ""],
+    ["Invested so far", inr(s.investedTotal), J.GOLD, ""],
+  ];
+  let y = 1150;
+  rows.forEach(([label, val, color, note], i) => {
+    jt(ctx, label, L, y, JD(40, 500), J.MUTED);
+    jt(ctx, val, R, y, JD(52), color, "right", 520);
+    if (note) jt(ctx, note, R, y + 42, JM(26), J.GREEN, "right");
+    y += note ? 70 : 0;
+    if (i < rows.length - 1) { ctx.fillStyle = J.LINE; ctx.fillRect(L, y + 30, R - L, 2); }
+    y += 90;
+  });
+
+  // call to action + handle
+  const cy = y - 10;
+  roundRect(ctx, L, cy, R - L, 96, 48); ctx.fillStyle = "rgba(242,181,68,.12)"; ctx.fill();
+  ctx.strokeStyle = J.GOLD; ctx.lineWidth = 3; roundRect(ctx, L, cy, R - L, 96, 48); ctx.stroke();
+  jt(ctx, `Comment below  →  +${inr(s.perAction)} in the jar`, (L + R) / 2, cy + 62, JD(40, 700), J.GOLD, "center", R - L - 60);
+  if (handle) jt(ctx, handle, (L + R) / 2, cy + 150, JM(26), J.MUTED, "center", null, 2);
+}
+
+// ---------- the Clearing Log (debt-first daily post) ----------
+// Answers "what did I do for my debt today, and how far along am I?" — progress against a fixed
+// starting line, today's repayment moves (never with names), what's next in the snowball, streaks,
+// and everyday spending reduced to one line.
+const TYPE_MOVE = { family: ["🤝", "Repaid family & friends"], regulated: ["🏦", "Loan payment"], payday: ["⚡", "Payday loan paid"] };
+export function buildClearingSnapshot({ date, expenses, payments, oblig, accounts, baseline, budget = 0, ffMonthly = 0 }) {
+  const open = (oblig || []).filter(o => o.status !== "closed" && o.status !== "settled");
+  const owed = open.reduce((t, o) => t + (+o.outstanding || 0), 0);
+  const start = (baseline && +baseline.total) || owed;
+  const cleared = Math.max(0, start - owed);
+  const pct = start > 0 ? (cleared / start) * 100 : 0;
+  const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
+  const byId = Object.fromEntries((oblig || []).map(o => [o.id, o]));
+  // Today's moves
+  const moves = {};
+  (payments || []).filter(p => p.date === date && net(p) > 0).forEach(p => {
+    const o = byId[p.obligId] || {};
+    const key = o.isCreditCard ? "card" : (o.type || "regulated");
+    const [icon, label] = key === "card" ? ["💳", "Card bill paid"] : (TYPE_MOVE[key] || ["💸", "Debt payment"]);
+    moves[key] = moves[key] || { icon, label, amount: 0, count: 0, closed: 0 };
+    moves[key].amount += net(p); moves[key].count++;
+    if ((o.status === "closed" || o.status === "settled") && o.closedAt === date) moves[key].closed++;
+  });
+  const moveList = Object.values(moves).sort((a, b) => b.amount - a.amount);
+  const wc = (accounts || []).find(a => a.warChest?.on && a.warChest.lastLoggedDate === date);
+  if (wc) moveList.push({ icon: "🪙", label: "Into the war chest", amount: +wc.warChest.target || 0, count: 1 });
+  const todaySpend = (expenses || []).filter(e => e.date === date).reduce((t, e) => t + (+e.amount || 0), 0);
+  const noSpend = todaySpend === 0;
+  // Next up: the snowball target (pinned first, otherwise smallest friends & family balance)
+  const fam = open.filter(o => o.type === "family" && (+o.outstanding || 0) > 0).sort((a, b) => {
+    const pa = a.priority ?? null, pb = b.priority ?? null;
+    if (pa !== null || pb !== null) return (pa ?? Infinity) - (pb ?? Infinity);
+    return (+a.outstanding) - (+b.outstanding);
+  });
+  const next = fam[0] ? { left: +fam[0].outstanding, months: ffMonthly > 0 ? Math.ceil(+fam[0].outstanding / ffMonthly) : null } : null;
+  // Streaks
+  const acted = (d) => (payments || []).some(p => p.date === d && net(p) > 0) || !(expenses || []).some(e => e.date === d);
+  // Streak only counts days since you started tracking (starting line, or your first entry).
+  const firstDay = [baseline && baseline.date, ...(expenses || []).map(e => e.date), ...(payments || []).map(p => p.date)].filter(Boolean).sort()[0] || date;
+  let streak = 0; { const d = new Date(date + "T00:00:00"); if (!acted(date)) d.setDate(d.getDate() - 1); for (let k = 0; k < 400 && localDate(d) >= firstDay && acted(localDate(d)); k++) { streak++; d.setDate(d.getDate() - 1); } }
+  const lastBorrow = (oblig || []).map(o => o.addedOn || o.startDate || "").filter(Boolean).sort().pop();
+  const noBorrowDays = lastBorrow ? Math.max(0, Math.round((new Date(date + "T00:00:00") - new Date(lastBorrow + "T00:00:00")) / 86400000)) : null;
+  const total = (oblig || []).length, closed = total - open.length;
+  const monthSpend = (expenses || []).filter(e => (e.date || "").slice(0, 7) === date.slice(0, 7) && e.date <= date).reduce((t, e) => t + (+e.amount || 0), 0);
+  const monthKey = date.slice(0, 7);
+  const monthRepaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === monthKey && p.date <= date).reduce((t, p) => t + net(p), 0);
+  const monthClosed = (oblig || []).filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === monthKey && o.closedAt <= date).length;
+  return { date, owed, start, startDate: baseline && baseline.date, cleared, pct, moveList, monthRepaid, monthClosed, noSpend, todaySpend, next, streak, noBorrowDays, total, closed, budget: +budget || 0, monthSpend };
+}
+const localDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+export function drawClearingLog(canvas, snap, { dayNumber, quote, hide = false }) {
+  HIDE = hide;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  paper(ctx);
+  const L = 150, R = W - 70, SAFE_BOTTOM = H - 250;
+  const d = new Date(snap.date + "T00:00:00");
+  const dayStr = String(dayNumber).padStart(2, "0");
+  const ty = header(ctx, L, R, "THE CLEARING LOG", `${d.toLocaleDateString("en-IN", { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}  ·  Day ${dayStr}`, 190);
+
+  // Progress
+  let y = ty + 165;
+  const since = snap.startDate ? new Date(snap.startDate + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "the start";
+  highlight(ctx, "DEBT CLEARED", L + 10, y, "#BFD98A", { size: 42 });
+  text(ctx, `since ${since}`, R, y, { size: 28, color: INK_SOFT, align: "right" });
+  y += 150;
+  const pctLabel = snap.pct > 0 && snap.pct < 1 ? "<1%" : (snap.pct < 10 ? snap.pct.toFixed(1) : Math.round(snap.pct)) + "%";
+  text(ctx, pctLabel, L + 4, y, { size: 150, weight: 700, color: "#2E7D5B" });
+  ctx.font = f(150, 700); const pw = ctx.measureText(pctLabel).width;
+  text(ctx, HIDE ? "of what I owed" : `${inr(snap.cleared)} gone`, L + pw + 36, y - 70, { size: 36, weight: 700, maxW: R - L - pw - 40 });
+  text(ctx, HIDE ? "is gone" : `${inr(snap.owed)} to go`, L + pw + 36, y - 22, { size: 32, color: INK_SOFT, maxW: R - L - pw - 40 });
+  y += 36;
+  ctx.save(); roundRect(ctx, L, y, R - L, 30, 15); ctx.fillStyle = "#EFE6CF"; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.stroke();
+  const fw = Math.max(30, (R - L) * Math.min(1, snap.pct / 100)); roundRect(ctx, L, y, fw, 30, 15); ctx.fillStyle = "#74B85C"; ctx.fill(); ctx.restore();
+  y += 76;
+  text(ctx, `${snap.closed} of ${snap.total} debts closed`, L + 4, y, { size: 34, weight: 700 });
+
+  const qm = measureQuote(ctx, quote, L, R);
+  const quoteTop = SAFE_BOTTOM - qm.h;
+  const spendY = quoteTop - 48;
+
+  // Today's moves
+  y += 96;
+  highlight(ctx, "TODAY'S MOVES", L + 10, y, "#F7D774", { size: 40 });
+  y += 64;
+  const rows = snap.moveList.slice();
+  if (snap.noSpend) rows.push({ icon: "🌱", label: "No-spend day", amount: null });
+  const rowH = rows.length > 4 ? 48 : 60, fs = rows.length > 4 ? 32 : 36;
+  if (!rows.length) {
+    text(ctx, "Held the line today — no new debt,", L + 10, y, { size: 36, color: INK_SOFT });
+    text(ctx, "spending kept in check.", L + 10, y + 50, { size: 36, color: INK_SOFT });
+    y += 100;
+  }
+  rows.slice(0, 6).forEach((m, i) => {
+    const yy = y + i * rowH;
+    const amt = m.amount == null ? "✓" : HIDE ? (m.count > 1 ? "×" + m.count : "✓") : inr(m.amount);
+    ctx.font = f(fs + 2, 700); const aw = ctx.measureText(amt).width;
+    text(ctx, `${m.icon}  ${m.label}${m.closed ? ` · ${m.closed} closed 🎉` : ""}`, L + 6, yy, { size: fs, maxW: R - L - aw - 30 });
+    text(ctx, amt, R, yy, { size: fs + 2, weight: 700, align: "right", color: m.amount == null ? "#2E7D5B" : INK });
+    dottedRule(ctx, L, R, yy + 18);
+  });
+  if (rows.length) y += Math.min(rows.length, 6) * rowH;
+
+  // This month
+  y += 50;
+  const sw = (R - L) / 2;
+  const stat = (i, label, value, color) => {
+    const cx = L + sw * i + sw / 2;
+    text(ctx, label, cx, y, { size: 24, align: "center", color: INK_SOFT });
+    text(ctx, value, cx, y + 54, { size: 46, weight: 700, align: "center", color, maxW: sw - 20 });
+  };
+  const divider = () => { ctx.save(); ctx.setLineDash([8, 8]); ctx.strokeStyle = "#8C96C4"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(L + sw, y - 28); ctx.lineTo(L + sw, y + 62); ctx.stroke(); ctx.restore(); };
+  stat(0, "REPAID THIS MONTH", HIDE ? "✓" : inr(snap.monthRepaid), INK);
+  stat(1, "DEBTS CLOSED THIS MONTH", String(snap.monthClosed), "#2E7D5B");
+  divider();
+
+  // Next up
+  y += 150;
+  if (snap.next) {
+    dashedBox(ctx, L, y - 42, R - L, 116, "#6D95CF");
+    text(ctx, "➡️  Next to clear: a family & friends loan", L + 22, y + 2, { size: 32, weight: 700, maxW: R - L - 44 });
+    const eta = snap.next.months ? `about ${snap.next.months <= 1 ? "a month" : snap.next.months + " months"} at this pace` : "";
+    text(ctx, [HIDE ? "" : inr(snap.next.left) + " to go", eta].filter(Boolean).join(" · ") || "one step at a time", L + 70, y + 50, { size: 30, color: INK_SOFT, maxW: R - L - 90 });
+    y += 150;
+  }
+
+  // Streaks
+  y += 10;
+  stat(0, "DAY STREAK", snap.streak + (snap.streak === 1 ? " day" : " days"), "#2E7D5B");
+  stat(1, "WITHOUT NEW BORROWING", snap.noBorrowDays == null ? "—" : snap.noBorrowDays + (snap.noBorrowDays === 1 ? " day" : " days"), "#6B5B8E");
+  divider();
+
+  // Everyday spending, one line
+  const under = snap.budget > 0 ? (snap.monthSpend <= snap.budget ? " · under budget ✓" : " · over budget this month") : "";
+  text(ctx, snap.noSpend ? `Everyday spend today: nothing${under}` : `Everyday spend today: ${HIDE ? "kept small" : inr(snap.todaySpend)}${under}`, (L + R) / 2, spendY, { size: 30, align: "center", color: INK_SOFT, maxW: R - L });
+
+  quoteBox(ctx, L, R, quoteTop, qm);
+  footer(ctx, L, R, H - 150, `DAY ${dayStr} / ∞`);
+}
+
 // ---------- monthly wrap-up ----------
 export function buildMonthWrap({ month, today, expenses, payments, incomes, oblig, sourceLabel, includeLoans = true }) {
   const inMonth = (x) => (x.date || "").slice(0, 7) === month;
@@ -317,10 +602,10 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   const loansPaid = pays.reduce((s, p) => s + (+p.amount || 0) - (+p.coversSpends || 0), 0);
   const byCat = {};
   exp.forEach(e => { const c = e.cat || "Other"; byCat[c] = (byCat[c] || 0) + (+e.amount || 0); });
-  if (includeLoans && loansPaid > 0) byCat["Loan repayments"] = loansPaid;
   const cats = Object.entries(byCat).map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value);
   const slices = cats.length > 6 ? [...cats.slice(0, 5), { label: "Everything else", value: cats.slice(5).reduce((s, x) => s + x.value, 0) }] : cats;
-  const outTotal = cats.reduce((s, x) => s + x.value, 0);
+  const outTotal = cats.reduce((s, x) => s + x.value, 0); // everyday spending (the chart)
+  const outAll = outTotal + loansPaid;                    // everything that went out
   const bySource = {};
   (incomes || []).filter(inMonth).forEach(i => { const k = sourceLabel(i); bySource[k] = (bySource[k] || 0) + (+i.amount || 0); });
   const sources = Object.entries(bySource).map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value);
@@ -328,7 +613,7 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   const [y, m] = month.split("-").map(Number);
   const prev = `${m === 1 ? y - 1 : y}-${String(m === 1 ? 12 : m - 1).padStart(2, "0")}`;
   const prevOut = (expenses || []).filter(e => (e.date || "").slice(0, 7) === prev).reduce((s, e) => s + (+e.amount || 0), 0)
-    + (includeLoans ? (payments || []).filter(p => (p.date || "").slice(0, 7) === prev).reduce((s, p) => s + (+p.amount || 0) - (+p.coversSpends || 0), 0) : 0);
+;
   // No-spend days: days so far this month (or the whole month, if it's over) with no everyday spend logged.
   const daysInMonth = new Date(y, m, 0).getDate();
   const lastDay = today.slice(0, 7) === month ? +today.slice(8, 10) : daysInMonth;
@@ -336,7 +621,7 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   let noSpend = 0;
   for (let d = 1; d <= lastDay; d++) if (!spendDays.has(`${month}-${String(d).padStart(2, "0")}`)) noSpend++;
   return {
-    month, slices, sources, outTotal, loansPaid, noSpend, daysSoFar: lastDay,
+    month, slices, sources, outTotal, outAll, loansPaid, noSpend, daysSoFar: lastDay,
     debtsCleared: (oblig || []).filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === month).length,
     inTotal: sources.reduce((s, x) => s + x.value, 0),
     vsLast: prevOut > 0 ? Math.round(((outTotal - prevOut) / prevOut) * 100) : null,
@@ -360,7 +645,7 @@ export function drawMonthWrap(canvas, wrap, { quote, hide = false }) {
   highlight(ctx, HIDE ? "CATEGORIES" : "MONEY IN", Rx + 10, r1, "#F7D774", { size: 42 });
   dashedBox(ctx, L, r1 + 30, colW, 150, "#D86A6A");
   dashedBox(ctx, Rx, r1 + 30, colW, 150, "#D9B64A");
-  text(ctx, HIDE ? String(wrap.daysSoFar - wrap.noSpend) : money(wrap.outTotal), L + colW / 2, r1 + 132, { size: 72, weight: 700, align: "center", maxW: colW - 30 });
+  text(ctx, HIDE ? String(wrap.daysSoFar - wrap.noSpend) : money(wrap.outAll), L + colW / 2, r1 + 132, { size: 72, weight: 700, align: "center", maxW: colW - 30 });
   text(ctx, HIDE ? String(wrap.slices.filter(x => x.label !== "Loan repayments").length) : money(wrap.inTotal), Rx + colW / 2, r1 + 132, { size: 72, weight: 700, align: "center", maxW: colW - 30 });
 
   // Three stats
@@ -408,14 +693,15 @@ export function drawMonthWrap(canvas, wrap, { quote, hide = false }) {
 //   settings.logPosts[date]  = { day, quote: {q, a} }  — recorded when you share/save a daily post
 //   settings.quotes          = [{q, a}]                — your own quotes, added to the rotation
 //   settings.logReminder     = true/false              — evening email if today's log isn't posted
-export default function MoneyLogModal({ date, onDateChange, snapshotInput, suggestedDay, posts, customQuotes, onAddQuote, onPosted, reminder, onReminder, privateDefault = false, onPrivateChange, onClose }) {
+export default function MoneyLogModal({ date, onDateChange, snapshotInput, suggestedDay, posts, customQuotes, onAddQuote, onPosted, reminder, onReminder, privateDefault = false, onPrivateChange, onClose, jar = null }) {
   const canvasRef = useRef(null);
-  const [mode, setMode] = useState("day");
+  const [mode, setMode] = useState(jar ? "jar" : "clear");
+  const daily = mode !== "month";
   const [month, setMonth] = useState(date.slice(0, 7));
   const [fontReady, setFontReady] = useState(false);
   const [url, setUrl] = useState(null);
   const [msg, setMsg] = useState("");
-  const [includeLoans, setIncludeLoans] = useState(false);
+  const includeLoans = true;
   const [showIncome, setShowIncome] = useState(true);
   const [hide, setHideRaw] = useState(privateDefault);
   const setHide = (v) => { setHideRaw(v); onPrivateChange && onPrivateChange(v); };
@@ -432,23 +718,31 @@ export default function MoneyLogModal({ date, onDateChange, snapshotInput, sugge
   }, [date]);
   useEffect(() => {
     let alive = true;
-    Promise.all([document.fonts.load(f(40, 400)), document.fonts.load(f(40, 700))]).catch(() => {}).finally(() => alive && setFontReady(true));
+    Promise.all([document.fonts.load(f(40, 400)), document.fonts.load(f(40, 700)), ...JAR_FONTS.map(x => document.fonts.load(x))]).catch(() => {}).finally(() => alive && setFontReady(true));
     return () => { alive = false; };
   }, []);
   useEffect(() => {
     if (!fontReady || !canvasRef.current) return;
-    if (mode === "day") drawMoneyLog(canvasRef.current, buildSnapshot({ ...snapshotInput, date, includeLoans, showIncome }), { dayNumber: +day || 1, quote, hide });
+    if (mode === "jar") {
+      // Spent today is everyday spending only; repayments get their own "paid today" line.
+      const snap = buildSnapshot({ ...snapshotInput, date, includeLoans: false, showIncome: false });
+      const paidToday = (snapshotInput.payments || []).filter(p => p.date === date).reduce((t, p) => t + Math.max(0, (+p.amount || 0) - (+p.coversSpends || 0)), 0);
+      // Same total as the Clear tab's "to go" (closed and settled debts don't count).
+      const debtLeft = (snapshotInput.oblig || []).filter(o => o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
+      drawJarLog(canvasRef.current, buildJarSnapshot({ date, jar, spentToday: snap.todayTotal, paidToday, debtLeft }), { dayNumber: +day || 1, hide });
+    } else if (mode === "clear") drawClearingLog(canvasRef.current, buildClearingSnapshot({ ...snapshotInput, date }), { dayNumber: +day || 1, quote, hide });
+    else if (mode === "day") drawMoneyLog(canvasRef.current, buildSnapshot({ ...snapshotInput, date, includeLoans, showIncome }), { dayNumber: +day || 1, quote, hide });
     else drawMonthWrap(canvasRef.current, buildMonthWrap({ ...snapshotInput, month, today: date, includeLoans }), { quote, hide });
     setUrl(canvasRef.current.toDataURL("image/png"));
-  }, [fontReady, snapshotInput, date, day, quote, includeLoans, showIncome, hide, mode, month]);
+  }, [fontReady, snapshotInput, date, day, quote, includeLoans, showIncome, hide, mode, month, jar]);
 
   function nextQuote() {
     const all = [...(customQuotes || []), ...QUOTES];
     const i = all.findIndex(x => x.q === quote.q);
     setQuote(all[(i + 1 + shuffle) % all.length]); setShuffle(0);
   }
-  const fileName = mode === "day" ? `money-log-${date}.png` : `money-wrap-${month}.png`;
-  const markPosted = () => { if (mode === "day") onPosted(date, { day: +day || 1, quote }); };
+  const fileName = mode === "jar" ? `jar-log-${date}.png` : mode === "month" ? `money-wrap-${month}.png` : `${mode === "clear" ? "clearing" : "money"}-log-${date}.png`;
+  const markPosted = () => { if (daily) onPosted(date, { day: +day || 1, quote }); };
   const toBlob = () => new Promise(res => canvasRef.current.toBlob(res, "image/png"));
   async function share() {
     setMsg("");
@@ -471,7 +765,7 @@ export default function MoneyLogModal({ date, onDateChange, snapshotInput, sugge
           <div style={{ fontWeight: 700 }}>The Money Log</div>
           <button className="ib" onClick={onClose} aria-label="Close"><X size={18} /></button>
         </div>
-        <div className="row" style={{ gap: 8 }}>{tab("day", "Daily log")}{tab("month", "Month wrap-up")}</div>
+        <div className="row" style={{ gap: 6 }}>{tab("clear", "Clearing")}{jar && tab("jar", "Jar")}{tab("day", "Spending")}{tab("month", "Month")}</div>
         <canvas ref={canvasRef} style={{ display: "none" }} />
         {url ? (
           <div style={{ position: "relative" }}>
@@ -489,7 +783,7 @@ export default function MoneyLogModal({ date, onDateChange, snapshotInput, sugge
         {msg && <div className="foot">{msg}</div>}
 
         <div style={{ display: "grid", gap: 10 }}>
-          {mode === "day" ? (
+          {daily ? (
             <div className="row" style={{ gap: 8 }}>
               <div style={{ flex: 2 }}><span className="lbl">Log for</span>
                 <input className="in" type="date" value={date} onChange={e => e.target.value && onDateChange(e.target.value)} /></div>
@@ -500,9 +794,9 @@ export default function MoneyLogModal({ date, onDateChange, snapshotInput, sugge
             <div><span className="lbl">Month</span>
               <input className="in" type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} /></div>
           )}
-          {mode === "day" && <div className="foot" style={{ marginTop: -4 }}>{saved ? `You posted this day as Day ${saved.day}.` : "Next day number counts up from your last post, so skipping a day doesn't break the count. Change it here if you need to."}</div>}
+          {daily && <div className="foot" style={{ marginTop: -4 }}>{saved ? `You posted this day as Day ${saved.day}.` : "Next day number counts up from your last post, so skipping a day doesn't break the count. Change it here if you need to."}</div>}
 
-          <div>
+          {mode !== "jar" && <div>
             <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
               <span className="lbl" style={{ margin: 0 }}>Quote of the day</span>
               <button className="chip" onClick={nextQuote} style={{ cursor: "pointer", background: "transparent", border: "1px solid #ccc" }}>Another quote ↻</button>
@@ -514,13 +808,10 @@ export default function MoneyLogModal({ date, onDateChange, snapshotInput, sugge
                 <button className="btn ghost" onClick={() => onAddQuote({ q: quote.q.trim(), a: quote.a.trim() })} style={{ padding: "8px 10px", fontSize: 12 }}>Save to my quotes</button>
               )}
             </div>
-          </div>
+          </div>}
 
           <label className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
-            <input type="checkbox" checked={!hide} onChange={e => setHide(!e.target.checked)} /> Show rupee amounts (notes are never shown)
-          </label>
-          <label className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
-            <input type="checkbox" checked={includeLoans} onChange={e => setIncludeLoans(e.target.checked)} /> Include loan repayments
+            <input type="checkbox" checked={!hide} onChange={e => setHide(!e.target.checked)} /> {mode === "jar" ? "Show spent and debt amounts (jar and invested amounts always show)" : "Show rupee amounts (notes are never shown)"}
           </label>
           {mode === "day" && (
             <label className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
