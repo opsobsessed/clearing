@@ -412,6 +412,8 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
     roundRect(ctx, L, 690, 640, 118, 22); ctx.fillStyle = J.GOLD; ctx.fill();
     jt(ctx, `${inr(invested)} INVESTED TODAY`, L + 28, 740, JD(40), J.BG, "left", 590);
     jt(ctx, `${inr(s.investA)} ${s.fundA}${s.investB ? `  ·  ${inr(s.investB)} ${s.fundB}` : ""}`, L + 28, 786, JM(26), J.BG, "left", 590);
+    // Naming real funds: keep the disclaimer next to them.
+    jt(ctx, "Not financial advice — just what I'm doing.", L, 846, JM(22), J.MUTED, "left", 640);
   } else {
     jt(ctx, `${inr(s.lot - into)} to go before it's invested`, L, 720, JD(40, 500), J.MUTED, "left", 640);
   }
@@ -449,7 +451,8 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
   const cy = y - 10;
   roundRect(ctx, L, cy, R - L, 96, 48); ctx.fillStyle = "rgba(242,181,68,.12)"; ctx.fill();
   ctx.strokeStyle = J.GOLD; ctx.lineWidth = 3; roundRect(ctx, L, cy, R - L, 96, 48); ctx.stroke();
-  jt(ctx, `Comment below  →  +${inr(s.perAction)} in the jar`, (L + R) / 2, cy + 62, JD(40, 700), J.GOLD, "center", R - L - 60);
+  jt(ctx, `Comment · Share · Save  →  ${inr(s.perAction)} each in my jar`, (L + R) / 2, cy + 50, JD(36, 700), J.GOLD, "center", R - L - 60);
+  jt(ctx, "One comment per person per video counts", (L + R) / 2, cy + 82, JM(22), J.GOLD, "center", R - L - 80);
   if (handle) jt(ctx, handle, (L + R) / 2, cy + 150, JM(26), J.MUTED, "center", null, 2);
 }
 

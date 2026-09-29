@@ -113,15 +113,16 @@ function nextWarChestLog(wc, todayStr) {
   const expectedPrevKey = localDay(d);
   return { lastLoggedDate: todayStr, streak: lastKey === expectedPrevKey ? (+wc.streak || 0) + 1 : 1 };
 }
-// Engagement mode: a daily base (so a quiet day still counts) plus ₹1 for every comment, share
-// and save on yesterday's post, never more than the daily cap. Older "views" setups read as this.
+// Engagement mode: a daily base (so a quiet day still counts) plus ₹X for every comment, share
+// and save on yesterday's post. The cap applies to the reactions only, so the most in a day is
+// base + cap (₹25 + ₹100 = ₹125) — the same rule the videos explain. Older "views" setups read as this.
 const isEngage = (wc) => wc && (wc.mode === "engage" || wc.mode === "views");
 function jarAmountFromEngagement(wc, e) {
   const base = +(wc.base ?? 25) || 0;
   const per = +(wc.perAction ?? 1) || 0;
   const cap = +wc.dailyCap || 100;
   const acts = (+e?.comments || 0) + (+e?.shares || 0) + (+e?.saves || 0);
-  return Math.max(0, Math.min(cap, Math.round(base + acts * per)));
+  return Math.max(0, Math.round(base + Math.min(cap, acts * per)));
 }
 // How much of the jar to move into the funds right now: whole lots of the minimum (₹500 by
 // default, since both funds need ₹100 per purchase), split by the chosen share.
@@ -858,7 +859,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   const hist = (wc.history || []).slice(-5).reverse();
   const fmt = (n) => new Intl.NumberFormat("en-IN").format(+n || 0);
   const perAct = +(wc.perAction ?? 1) || 0;
-  const capped = byEng && (+(wc.base ?? 25) + ((+eng.comments || 0) + (+eng.shares || 0) + (+eng.saves || 0)) * perAct) > (+wc.dailyCap || 100);
+  const capped = byEng && ((+eng.comments || 0) + (+eng.shares || 0) + (+eng.saves || 0)) * perAct > (+wc.dailyCap || 100);
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -877,7 +878,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
             ))}
             <div className="num" style={{ fontSize: 20, minWidth: 56, textAlign: "right", color: C.violet }}>₹{amt}</div>
           </div>
-          <div className="sub" style={{ marginTop: 4 }}>₹{+(wc.base ?? 25) || 0} base + ₹{perAct} each · max ₹{+wc.dailyCap || 100} a day{capped ? " — capped today" : ""}</div>
+          <div className="sub" style={{ marginTop: 4 }}>My ₹{+(wc.base ?? 25) || 0} + ₹{perAct} per reaction (up to ₹{+wc.dailyCap || 100}) · max ₹{(+(wc.base ?? 25) || 0) + (+wc.dailyCap || 100)} a day · one comment per person counts{capped ? " — reactions capped today" : ""}</div>
         </div>
       )}
       <div className="row" style={{ gap: 8, marginTop: 10 }}>
@@ -2263,7 +2264,7 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
                 <input className="in num" type="number" value={a.warChest.base ?? 25} onChange={e => upd({ warChest: { ...a.warChest, base: +e.target.value } })} /></div>
               <div style={{ flex: 1 }}><span className="lbl">₹ per comment / share / save</span>
                 <input className="in num" type="number" value={a.warChest.perAction ?? 1} onChange={e => upd({ warChest: { ...a.warChest, perAction: +e.target.value } })} /></div>
-              <div style={{ flex: 1 }}><span className="lbl">Daily cap ₹</span>
+              <div style={{ flex: 1 }}><span className="lbl">Reactions cap ₹ (on top of base)</span>
                 <input className="in num" type="number" value={a.warChest.dailyCap ?? 100} onChange={e => upd({ warChest: { ...a.warChest, dailyCap: +e.target.value } })} /></div>
             </div>
           )}
