@@ -480,8 +480,13 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
     if ((o.status === "closed" || o.status === "settled") && o.closedAt === date) moves[key].closed++;
   });
   const moveList = Object.values(moves).sort((a, b) => b.amount - a.amount);
-  const wc = (accounts || []).find(a => a.warChest?.on && a.warChest.lastLoggedDate === date);
-  if (wc) moveList.push({ icon: "🪙", label: "Into the war chest", amount: +wc.warChest.target || 0, count: 1 });
+  // The jar's actual entries for that day (base + reactions, plus any top-ups), not the fixed target.
+  const jarAcc = (accounts || []).find(a => a.warChest?.on);
+  if (jarAcc) {
+    const hist = (jarAcc.warChest.history || []).filter(h => h.date === date);
+    const jarIn = hist.length ? hist.reduce((t, h) => t + (+h.amount || 0), 0) : (jarAcc.warChest.lastLoggedDate === date ? +jarAcc.warChest.target || 0 : 0);
+    if (jarIn > 0) moveList.push({ icon: "🫙", label: "Into the jar", amount: jarIn, count: 1 });
+  }
   const todaySpend = (expenses || []).filter(e => e.date === date).reduce((t, e) => t + (+e.amount || 0), 0);
   const noSpend = todaySpend === 0;
   // Next up: the snowball target (pinned first, otherwise smallest friends & family balance)

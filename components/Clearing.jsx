@@ -119,10 +119,21 @@ function nextWarChestLog(wc, todayStr) {
 const isEngage = (wc) => wc && (wc.mode === "engage" || wc.mode === "views");
 function jarAmountFromEngagement(wc, e) {
   const base = +(wc.base ?? 25) || 0;
-  const per = +(wc.perAction ?? 1) || 0;
+  const per = +(wc.perAction ?? 2) || 0;
   const cap = +wc.dailyCap || 100;
   const acts = (+e?.comments || 0) + (+e?.shares || 0) + (+e?.saves || 0);
   return Math.max(0, Math.round(base + Math.min(cap, acts * per)));
+}
+// Has the daily jar amount (not a top-up) been logged for this date? Also true for days logged
+// before the jar kept a history.
+function jarLoggedOn(wc, d) { return wc.lastLoggedDate === d || (wc.history || []).some(h => h.date === d && !h.topUp); }
+// Consecutive days with a daily entry, counting back from `last`.
+function jarStreak(wc, history, last) {
+  const days = new Set(history.filter(h => !h.topUp).map(h => h.date));
+  if (wc.lastLoggedDate) days.add(wc.lastLoggedDate);
+  let n = 0; const d = new Date(last + "T00:00:00");
+  while (days.has(localDay(d)) && n < 1000) { n++; d.setDate(d.getDate() - 1); }
+  return n;
 }
 // How much of the jar to move into the funds right now: whole lots of the minimum (₹500 by
 // default, since both funds need ₹100 per purchase), split by the chosen share.
@@ -542,7 +553,7 @@ export default function Clearing({ userId }) {
     const acc = accounts.find(a => a.warChest?.on);
     if (!acc) return null;
     const wc = acc.warChest, nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
-    return { balance: +acc.balance || 0, lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 1) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
+    return { balance: +acc.balance || 0, lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 2) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
   }, [accounts]);
   // The starting line for "how much of my debt is gone": set once (today, what's open now) and editable in Settings.
   const owedNow = oblig.filter(o => o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
@@ -608,22 +619,32 @@ export default function Clearing({ userId }) {
   // war-chest account and advances the streak. This never touches a real bank — it's the same
   // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
   // optional UPI deep link) is still on the person, this just keeps score.
-  function logWarChest(accountId, eng) {
+  // forDate lets a missed or late-night day be logged on the right date (daily jars only).
+  function logWarChest(accountId, eng, forDate) {
     const today = localDay();
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
-    const step = nextWarChestLog(acc.warChest, today);
-    if (!step) return; // already logged this period
+    const daily = acc.warChest.cadence !== "weekly";
+    const day = daily && forDate ? forDate : today;
+    let step;
+    if (daily) {
+      if (jarLoggedOn(acc.warChest, day)) return; // already logged that day
+      const last = [acc.warChest.lastLoggedDate || "", day].sort().pop();
+      step = { lastLoggedDate: last, streak: jarStreak(acc.warChest, [...(acc.warChest.history || []), { date: day }], last) };
+    } else {
+      step = nextWarChestLog(acc.warChest, today);
+      if (!step) return; // already logged this period
+    }
     const byEng = isEngage(acc.warChest);
     const e = { comments: +eng?.comments || 0, shares: +eng?.shares || 0, saves: +eng?.saves || 0 };
     const amt = byEng ? jarAmountFromEngagement(acc.warChest, e) : (+acc.warChest.target || 0);
-    const entry = { date: today, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e } : {}) };
+    const entry = { date: day, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e } : {}) };
     setAccounts(list => list.map(a => {
       if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
       if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
       return a;
     }));
-    const lead = `₹${amt} into your jar`;
+    const lead = `₹${amt} into your jar${day !== today ? " for yesterday" : ""}`;
     setCelebrate(step.streak > 1 ? `${lead} — ${step.streak} in a row.` : `${lead}.`);
   }
   // Extra money into the jar on top of the daily amount — any amount, no daily cap, doesn't touch
@@ -851,14 +872,20 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   const byEng = isEngage(wc);
   const [eng, setEng] = useState({ comments: "", shares: "", saves: "" });
   const today = localDay();
-  const alreadyLogged = !nextWarChestLog(wc, today);
+  const daily = wc.cadence !== "weekly";
+  const yesterday = localDay(new Date(Date.now() - 86400000));
+  const [forYesterday, setForYesterday] = useState(false);
+  const logDay = daily && forYesterday ? yesterday : today;
+  const alreadyLogged = daily ? jarLoggedOn(wc, logDay) : !nextWarChestLog(wc, today);
+  // Offer yesterday when it was missed — e.g. logged after midnight, or skipped a day.
+  const canBackfill = daily && !jarLoggedOn(wc, yesterday);
   const amt = byEng ? jarAmountFromEngagement(wc, eng) : (+wc.target || 0);
   const upiLink = wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byEng ? "Engagement jar" : "Jar") : null;
   const plan = jarInvestPlan(wc, wcAccount.balance);
   const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
   const hist = (wc.history || []).slice(-5).reverse();
   const fmt = (n) => new Intl.NumberFormat("en-IN").format(+n || 0);
-  const perAct = +(wc.perAction ?? 1) || 0;
+  const perAct = +(wc.perAction ?? 2) || 0;
   const capped = byEng && ((+eng.comments || 0) + (+eng.shares || 0) + (+eng.saves || 0)) * perAct > (+wc.dailyCap || 100);
   return (
     <div className="card">
@@ -868,9 +895,16 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
       </div>
       <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
       <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>in the jar, waiting to be invested</div>
+      {(canBackfill || forYesterday) && (
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <span className="sub">Logging for</span>
+          <button className="pill" onClick={() => setForYesterday(v => !v)} style={{ whiteSpace: "nowrap" }}>{forYesterday ? "Yesterday" : "Today"} ⇄</button>
+          {!forYesterday && <span className="sub">Yesterday wasn't logged</span>}
+        </div>
+      )}
       {byEng && !alreadyLogged && (
         <div style={{ marginTop: 10 }}>
-          <span className="lbl">On yesterday's post (leave blank if none)</span>
+          <span className="lbl">{forYesterday ? "On the post before yesterday" : "On yesterday's post"} (leave blank if none)</span>
           <div className="row" style={{ gap: 8 }}>
             {[["comments", "Comments"], ["shares", "Shares"], ["saves", "Saves"]].map(([k, label]) => (
               <input key={k} className="in num" style={{ flex: 1, minWidth: 0 }} type="number" inputMode="numeric" min="0" placeholder={label} aria-label={label}
@@ -887,9 +921,9 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
             <div className="btn ghost" style={{ justifyContent: "center" }}>Send ₹{amt} via UPI</div>
           </a>
         )}
-        <button className="btn" disabled={alreadyLogged || amt <= 0} onClick={() => { logWarChest(wcAccount.id, eng); setEng({ comments: "", shares: "", saves: "" }); }}
+        <button className="btn" disabled={alreadyLogged || amt <= 0} onClick={() => { logWarChest(wcAccount.id, eng, logDay); setEng({ comments: "", shares: "", saves: "" }); setForYesterday(false); }}
           style={{ flex: 1, justifyContent: "center", opacity: alreadyLogged ? 0.5 : 1, background: C.violet }}>
-          {alreadyLogged ? "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day") : `Log ₹${amt}`}
+          {alreadyLogged ? (forYesterday ? "✓ yesterday is logged" : "✓ logged this " + (wc.cadence === "weekly" ? "week" : "day")) : `Log ₹${amt}${forYesterday ? " for yesterday" : ""}`}
         </button>
       </div>
       {topUp === null ? (
@@ -2252,7 +2286,7 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
         <div className="panel" style={{ display: "grid", gap: 8 }}>
           <div className="sub">Small, steady amounts set aside here, then moved into your funds.</div>
           <Seg options={[["fixed", "Fixed amount"], ["engage", "Base + engagement"]]} value={isEngage(a.warChest) ? "engage" : "fixed"}
-            onChange={(v) => upd({ warChest: { ...a.warChest, mode: v, ...(v === "engage" ? { cadence: "daily", base: a.warChest.base ?? 25, perAction: a.warChest.perAction ?? 1, dailyCap: a.warChest.dailyCap || 100 } : {}) } })} />
+            onChange={(v) => upd({ warChest: { ...a.warChest, mode: v, ...(v === "engage" ? { cadence: "daily", base: a.warChest.base ?? 25, perAction: a.warChest.perAction ?? 2, dailyCap: a.warChest.dailyCap || 100 } : {}) } })} />
           {!isEngage(a.warChest) ? (
             <div className="row" style={{ gap: 8 }}>
               <input className="in num" style={{ flex: 1 }} type="number" placeholder="10" value={a.warChest.target || ""} onChange={e => upd({ warChest: { ...a.warChest, target: +e.target.value } })} />
@@ -2263,7 +2297,7 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
               <div style={{ flex: 1 }}><span className="lbl">Daily base ₹</span>
                 <input className="in num" type="number" value={a.warChest.base ?? 25} onChange={e => upd({ warChest: { ...a.warChest, base: +e.target.value } })} /></div>
               <div style={{ flex: 1 }}><span className="lbl">₹ per comment / share / save</span>
-                <input className="in num" type="number" value={a.warChest.perAction ?? 1} onChange={e => upd({ warChest: { ...a.warChest, perAction: +e.target.value } })} /></div>
+                <input className="in num" type="number" value={a.warChest.perAction ?? 2} onChange={e => upd({ warChest: { ...a.warChest, perAction: +e.target.value } })} /></div>
               <div style={{ flex: 1 }}><span className="lbl">Reactions cap ₹ (on top of base)</span>
                 <input className="in num" type="number" value={a.warChest.dailyCap ?? 100} onChange={e => upd({ warChest: { ...a.warChest, dailyCap: +e.target.value } })} /></div>
             </div>
