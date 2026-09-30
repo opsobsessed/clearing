@@ -374,6 +374,8 @@ export function buildJarSnapshot({ date, jar, spentToday, paidToday = 0, debtLef
   const inv = invested.filter(x => x.date === date).reduce((t, x) => ({ a: t.a + (+x.a || 0), b: t.b + (+x.b || 0) }), { a: 0, b: 0 });
   return {
     date, entry, topUp,
+    // Reactions are counted from the post before the day they're logged.
+    forPost: entry ? (entry.forPost || (() => { const d = new Date(date + "T00:00:00"); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })()) : null,
     lot: +(jar && jar.lot) || 500,
     balance: Math.max(0, +(jar && jar.balance) || 0),
     base: entry ? (entry.base ?? (entry.comments === undefined ? +entry.amount || 0 : 0)) : 0,
@@ -408,6 +410,10 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
   jt(ctx, "IN THE JAR", L, 360, JM(28), J.MUTED, "left", null, 5);
   jt(ctx, inr(s.balance), L - 6, 560, JD(230), J.TXT, "left", 650);
   jt(ctx, s.inToday > 0 ? `+${inr(s.inToday)} today` : "not logged yet", L, 640, JD(56, 700), s.inToday > 0 ? J.GREEN : J.MUTED);
+  if (s.inToday > 0 && s.forPost) {
+    const fromYou = Math.max(0, (s.entry ? +s.entry.amount || 0 : 0) - s.base);
+    jt(ctx, `my ${inr(s.base)} + ${inr(fromYou)} from your reactions yesterday${s.topUp ? ` + ${inr(s.topUp)} top-up` : ""}`, L, 680, JM(24), J.MUTED, "left", 640);
+  }
   if (invested) {
     roundRect(ctx, L, 690, 640, 118, 22); ctx.fillStyle = J.GOLD; ctx.fill();
     jt(ctx, `${inr(invested)} INVESTED TODAY`, L + 28, 740, JD(40), J.BG, "left", 590);
@@ -419,7 +425,8 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
   }
 
   // what went in: tiles (a top-up takes the place of the saves tile's neighbour when there is one)
-  jt(ctx, "WHAT WENT IN", L, 890, JM(26), J.MUTED, "left", null, 5);
+  const fp = s.forPost ? new Date(s.forPost + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }).toUpperCase() : "";
+  jt(ctx, s.forPost ? `WHAT WENT IN · FROM YESTERDAY'S POST (${fp})` : "WHAT WENT IN", L, 890, JM(26), J.MUTED, "left", R - L, 4);
   const pl = (n, w) => `${n} ${w}${n === 1 ? "" : "S"}`;
   const tiles = [["BASE", s.base], [pl(s.comments, "COMMENT"), s.comments * s.perAction], [pl(s.shares, "SHARE"), s.shares * s.perAction], [pl(s.saves, "SAVE"), s.saves * s.perAction]];
   if (s.topUp > 0) tiles.push(["TOP-UP", s.topUp]);

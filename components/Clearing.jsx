@@ -52,6 +52,10 @@ const REMIND_DAYS = 10;
 const pad2 = (n) => String(n).padStart(2, "0");
 const localDay = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const localMonth = (d = new Date()) => localDay(d).slice(0, 7);
+// Your "posting day" runs until 5am, so a night-shift log at 1am still counts as the day before —
+// used for the jar and the Money Log (not for spending entries, which keep their real date).
+const DAY_ENDS_AT = 5;
+const postDay = () => localDay(new Date(Date.now() - DAY_ENDS_AT * 3600e3));
 const INCOME_SOURCES = ["Salary", "Reimbursement", "Freelance / side income", "Refund / cashback", "Gift", "Other"];
 const incomeSourceLabel = (i) => i.source || "Untagged";
 // Credit-card payments: the part that just pays for spends already logged on that card is a
@@ -557,11 +561,11 @@ export default function Clearing({ userId }) {
     if (before.length) return (+logPosts[before[before.length - 1]].day || 0) + 1;
     return Math.max(1, Math.round((new Date(d + "T00:00:00") - new Date(firstEntryDate + "T00:00:00")) / 86400000) + 1);
   };
-  const todayKey = localDay();
+  const todayKey = postDay();
   const postedToday = logPosts[todayKey];
   // Posting streak: consecutive calendar days with a post, ending today (or yesterday, if today isn't posted yet).
   const postStreak = (() => {
-    let n = 0; const d = new Date(); if (!postedToday) d.setDate(d.getDate() - 1);
+    let n = 0; const d = new Date(todayKey + "T12:00:00"); if (!postedToday) d.setDate(d.getDate() - 1);
     while (logPosts[localDay(d)]) { n++; d.setDate(d.getDate() - 1); }
     return n;
   })();
@@ -609,7 +613,7 @@ export default function Clearing({ userId }) {
   // honor-system logging as the rest of the app; actually sending the money (by hand, or via the
   // optional UPI deep link) is still on the person, this just keeps score.
   function logWarChest(accountId, eng) {
-    const today = localDay();
+    const today = postDay();
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
     const step = nextWarChestLog(acc.warChest, today);
@@ -617,7 +621,7 @@ export default function Clearing({ userId }) {
     const byEng = isEngage(acc.warChest);
     const e = { comments: +eng?.comments || 0, shares: +eng?.shares || 0, saves: +eng?.saves || 0 };
     const amt = byEng ? jarAmountFromEngagement(acc.warChest, e) : (+acc.warChest.target || 0);
-    const entry = { date: today, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e } : {}) };
+    const entry = { date: today, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e, forPost: addDaysStr(today, -1) } : {}) };
     setAccounts(list => list.map(a => {
       if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
       if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
@@ -632,7 +636,7 @@ export default function Clearing({ userId }) {
     const amt = Math.round(+amount || 0);
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on || amt <= 0) return;
-    const entry = { date: localDay(), amount: amt, topUp: true };
+    const entry = { date: postDay(), amount: amt, topUp: true };
     setAccounts(list => list.map(a => {
       if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, history: [...(a.warChest.history || []), entry].slice(-400) } };
       if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
@@ -649,7 +653,7 @@ export default function Clearing({ userId }) {
     if (!p) return;
     const wc = acc.warChest;
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: localDay(), a: p.a, b: p.b }].slice(-200) } };
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: postDay(), a: p.a, b: p.b }].slice(-200) } };
       if (a.id === wc.fundAId) return { ...a, ...growAfterMove(a, p.a), balance: (+a.balance || 0) + p.a };
       if (p.b && a.id === wc.fundBId) return { ...a, ...growAfterMove(a, p.b), balance: (+a.balance || 0) + p.b };
       return a;
@@ -782,7 +786,7 @@ export default function Clearing({ userId }) {
         </div>
       )}
       {tab === "home" && (
-        <button className="btn ghost" onClick={() => setLogDate(localDay())} style={{ width: "100%", marginBottom: 14, flexDirection: "column", gap: 2 }}>
+        <button className="btn ghost" onClick={() => setLogDate(postDay())} style={{ width: "100%", marginBottom: 14, flexDirection: "column", gap: 2 }}>
           <span className="row" style={{ gap: 6 }}><Camera size={16} /> {postedToday ? `Day ${postedToday.day} posted ✓` : `Today's Money Log · Day ${suggestedDay(todayKey)}`}</span>
           <span style={{ fontSize: 11.5, fontWeight: 500, opacity: .75 }}>{postedToday ? "Tap to re-share or make the month wrap-up" : "Not posted yet — tap to make and share it"}{postStreak > 1 ? ` · ${postStreak}-day streak` : ""}</span>
         </button>
@@ -850,7 +854,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   const wc = wcAccount.warChest;
   const byEng = isEngage(wc);
   const [eng, setEng] = useState({ comments: "", shares: "", saves: "" });
-  const today = localDay();
+  const today = postDay();
   const alreadyLogged = !nextWarChestLog(wc, today);
   const amt = byEng ? jarAmountFromEngagement(wc, eng) : (+wc.target || 0);
   const upiLink = wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byEng ? "Engagement jar" : "Jar") : null;
@@ -870,7 +874,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
       <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>in the jar, waiting to be invested</div>
       {byEng && !alreadyLogged && (
         <div style={{ marginTop: 10 }}>
-          <span className="lbl">On yesterday's post (leave blank if none)</span>
+          <span className="lbl">Yesterday's post ({new Date(addDaysStr(today, -1) + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}) — its reactions go in today</span>
           <div className="row" style={{ gap: 8 }}>
             {[["comments", "Comments"], ["shares", "Shares"], ["saves", "Saves"]].map(([k, label]) => (
               <input key={k} className="in num" style={{ flex: 1, minWidth: 0 }} type="number" inputMode="numeric" min="0" placeholder={label} aria-label={label}
