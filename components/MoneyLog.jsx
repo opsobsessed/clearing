@@ -470,19 +470,24 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
 // and everyday spending reduced to one line.
 const TYPE_MOVE = { family: ["🤝", "Repaid family & friends"], regulated: ["🏦", "Loan payment"], payday: ["⚡", "Payday loan paid"] };
 export function buildClearingSnapshot({ date, expenses, payments, oblig, accounts, baseline, budget = 0, ffMonthly = 0 }) {
-  const open = (oblig || []).filter(o => o.status !== "closed" && o.status !== "settled");
+  // Credit cards are spending you pay off each month, not debt you're clearing — they're left out
+  // of everything on this log (owed, cleared, moves, counts).
+  const debts = (oblig || []).filter(o => !o.isCreditCard);
+  const isDebtPay = (p) => { const o = (oblig || []).find(x => x.id === p.obligId); return !o || !o.isCreditCard; };
+  const open = debts.filter(o => o.status !== "closed" && o.status !== "settled");
   const owed = open.reduce((t, o) => t + (+o.outstanding || 0), 0);
   const start = (baseline && +baseline.total) || owed;
   const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
   // "Cleared" counts actual repayments since the starting line — so deleting or editing a debt in
   // Clear never shows up as progress, and interest added to the loan never erases what you paid.
   const since = (baseline && baseline.date) || "0000";
-  const cleared = (payments || []).filter(p => p.date >= since).reduce((t, p) => t + Math.max(0, net(p)), 0);
+  const debtPays = (payments || []).filter(isDebtPay);
+  const cleared = debtPays.filter(p => p.date >= since).reduce((t, p) => t + Math.max(0, net(p)), 0);
   const pct = start > 0 ? Math.min(100, (cleared / start) * 100) : 0;
   const byId = Object.fromEntries((oblig || []).map(o => [o.id, o]));
   // Today's moves — never with names or initials of the people you're repaying.
   const moves = {};
-  (payments || []).filter(p => p.date === date && net(p) > 0).forEach(p => {
+  debtPays.filter(p => p.date === date && net(p) > 0).forEach(p => {
     const o = byId[p.obligId] || {};
     const key = o.isCreditCard ? "card" : (o.type || "regulated");
     const [icon, label] = key === "card" ? ["💳", "Card bill paid"] : (TYPE_MOVE[key] || ["💸", "Debt payment"]);
@@ -491,8 +496,7 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
     if ((o.status === "closed" || o.status === "settled") && o.closedAt === date) moves[key].closed++;
   });
   const moveList = Object.values(moves).sort((a, b) => b.amount - a.amount);
-  const wc = (accounts || []).find(a => a.warChest?.on && a.warChest.lastLoggedDate === date);
-  if (wc) moveList.push({ icon: "🪙", label: "Into the war chest", amount: +wc.warChest.target || 0, count: 1 });
+  // The jar has its own post (Jar tab), so it isn't listed here as a debt move.
   const todaySpend = (expenses || []).filter(e => e.date === date).reduce((t, e) => t + (+e.amount || 0), 0);
   const noSpend = todaySpend === 0;
   // Next up: the snowball target (pinned first, otherwise smallest friends & family balance)
@@ -503,19 +507,19 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   });
   const next = fam[0] ? { left: +fam[0].outstanding, months: ffMonthly > 0 ? Math.ceil(+fam[0].outstanding / ffMonthly) : null } : null;
   // Streaks
-  const acted = (d) => (payments || []).some(p => p.date === d && net(p) > 0) || !(expenses || []).some(e => e.date === d);
+  const acted = (d) => debtPays.some(p => p.date === d && net(p) > 0) || !(expenses || []).some(e => e.date === d);
   // Streak only counts days since you started tracking (starting line, or your first entry).
   const firstDay = [baseline && baseline.date, ...(expenses || []).map(e => e.date), ...(payments || []).map(p => p.date)].filter(Boolean).sort()[0] || date;
   let streak = 0; { const d = new Date(date + "T00:00:00"); if (!acted(date)) d.setDate(d.getDate() - 1); for (let k = 0; k < 400 && localDate(d) >= firstDay && acted(localDate(d)); k++) { streak++; d.setDate(d.getDate() - 1); } }
   const lastBorrow = (oblig || []).map(o => o.addedOn || o.startDate || "").filter(Boolean).sort().pop();
   const noBorrowDays = lastBorrow ? Math.max(0, Math.round((new Date(date + "T00:00:00") - new Date(lastBorrow + "T00:00:00")) / 86400000)) : null;
-  const total = (oblig || []).length, closed = total - open.length;
+  const total = debts.length, closed = total - open.length;
   const openLoans = open.filter(o => o.type !== "family" && !o.isCreditCard).length, // a card you pay off monthly isn't a debt to clear
     openFam = open.filter(o => o.type === "family").length;
   const monthSpend = (expenses || []).filter(e => (e.date || "").slice(0, 7) === date.slice(0, 7) && e.date <= date).reduce((t, e) => t + (+e.amount || 0), 0);
   const monthKey = date.slice(0, 7);
-  const monthRepaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === monthKey && p.date <= date).reduce((t, p) => t + net(p), 0);
-  const monthClosed = (oblig || []).filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === monthKey && o.closedAt <= date).length;
+  const monthRepaid = debtPays.filter(p => (p.date || "").slice(0, 7) === monthKey && p.date <= date).reduce((t, p) => t + net(p), 0);
+  const monthClosed = debts.filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === monthKey && o.closedAt <= date).length;
   return { date, owed, start, startDate: baseline && baseline.date, cleared, pct, moveList, monthRepaid, monthClosed, openLoans, openFam, noSpend, todaySpend, next, streak, noBorrowDays, total, closed, budget: +budget || 0, monthSpend };
 }
 const localDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;

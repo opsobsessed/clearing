@@ -560,8 +560,18 @@ export default function Clearing({ userId }) {
     return { balance: jarBalance(wc), lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 1) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
   }, [accounts]);
   // The starting line for "how much of my debt is gone": set once (today, what's open now) and editable in Settings.
-  const owedNow = oblig.filter(o => o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
-  useEffect(() => { if (ready && !settings.baseline && owedNow > 0) setSettings(s => s.baseline ? s : { ...s, baseline: { date: localDay(), total: Math.round(owedNow) } }); }, [ready]);
+  // Credit cards aren't debt to clear here — they're monthly spending you pay off.
+  const owedNow = oblig.filter(o => !o.isCreditCard && o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
+  useEffect(() => { if (ready && !settings.baseline && owedNow > 0) setSettings(s => s.baseline ? s : { ...s, baseline: { date: localDay(), total: Math.round(owedNow), noCards: true } }); }, [ready]);
+  // One-time fix for a starting line set while cards still counted: take out the card balance it
+  // included (= what's been paid on cards since that date, plus any card still open from before it).
+  useEffect(() => {
+    const b = settings.baseline;
+    if (!ready || !b || b.noCards || !b.date) return;
+    const cardIds = new Set(oblig.filter(o => o.isCreditCard).map(o => o.id));
+    const paidOnCards = payments.filter(p => cardIds.has(p.obligId) && p.date >= b.date).reduce((t, p) => t + Math.max(0, (+p.amount || 0) - (+p.coversSpends || 0)), 0);
+    setSettings(s => s.baseline && !s.baseline.noCards ? { ...s, baseline: { ...s.baseline, total: Math.max(0, Math.round((+s.baseline.total || 0) - paidOnCards)), noCards: true } } : s);
+  }, [ready]);
   const snapshotInput = useMemo(() => ({ expenses, payments, incomes, oblig, accounts, sourceLabel: incomeSourceLabel, budget: settings.budget, baseline: settings.baseline, ffMonthly: planResult.ffTotal }), [expenses, payments, incomes, oblig, accounts, settings.budget, settings.baseline, planResult.ffTotal]);
   const firstEntryDate = useMemo(() => [...expenses, ...incomes, ...payments].map(x => x.date).filter(Boolean).sort()[0] || localDay(), [expenses, incomes, payments]);
   // Day numbers count posts, not calendar days: the next post is your last posted day + 1, so a
@@ -2590,7 +2600,7 @@ function SettingsSheet({ settings, setSettings, notif, askNotif, exportData, imp
 
       <div>
         <span className="lbl">Your starting line</span>
-        <div className="sub" style={{ marginBottom: 8 }}>What you owed in total on the day you start measuring from — the Clearing Log shows how much of it is gone.</div>
+        <div className="sub" style={{ marginBottom: 8 }}>What you owed in total (loans and family & friends, not credit cards) on the day you start measuring from — the Clearing Log shows how much of it is gone.</div>
         <div className="row" style={{ gap: 8 }}>
           <input className="in" type="date" style={{ flex: 1 }} value={(settings.baseline || {}).date || ""} onChange={e => setSettings(s => ({ ...s, baseline: { ...(s.baseline || {}), date: e.target.value } }))} />
           <input className="in num" type="number" inputMode="numeric" style={{ flex: 1 }} placeholder="Total owed" value={(settings.baseline || {}).total || ""} onChange={e => setSettings(s => ({ ...s, baseline: { ...(s.baseline || {}), total: +e.target.value } }))} />
