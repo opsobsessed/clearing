@@ -406,7 +406,8 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
 
   // hero: the jar
   const into = s.balance % s.lot, invested = s.investA + s.investB;
-  jarMeter(ctx, 760, 360, 180, 440, into / s.lot, s.lot);
+  const ready = s.balance >= s.lot;
+  jarMeter(ctx, 760, 360, 180, 440, ready ? 1 : into / s.lot, s.lot);
   jt(ctx, "IN THE JAR", L, 360, JM(28), J.MUTED, "left", null, 5);
   jt(ctx, inr(s.balance), L - 6, 560, JD(230), J.TXT, "left", 650);
   jt(ctx, s.inToday > 0 ? `+${inr(s.inToday)} today` : "not logged yet", L, 640, JD(56, 700), s.inToday > 0 ? J.GREEN : J.MUTED);
@@ -421,7 +422,7 @@ export function drawJarLog(canvas, s, { dayNumber, hide = false, handle = "@fina
     // Naming real funds: keep the disclaimer next to them.
     jt(ctx, "Not financial advice — just what I'm doing.", L, 846, JM(22), J.MUTED, "left", 640);
   } else {
-    jt(ctx, `${inr(s.lot - into)} to go before it's invested`, L, 720, JD(40, 500), J.MUTED, "left", 640);
+    jt(ctx, ready ? `${inr(Math.floor(s.balance / s.lot) * s.lot)} ready to invest` : `${inr(s.lot - into)} to go before it's invested`, L, 732, JD(40, 500), ready ? J.GOLD : J.MUTED, "left", 640);
   }
 
   // what went in: tiles (a top-up takes the place of the saves tile's neighbour when there is one)
@@ -472,11 +473,14 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   const open = (oblig || []).filter(o => o.status !== "closed" && o.status !== "settled");
   const owed = open.reduce((t, o) => t + (+o.outstanding || 0), 0);
   const start = (baseline && +baseline.total) || owed;
-  const cleared = Math.max(0, start - owed);
-  const pct = start > 0 ? (cleared / start) * 100 : 0;
   const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
+  // "Cleared" counts actual repayments since the starting line — so deleting or editing a debt in
+  // Clear never shows up as progress, and interest added to the loan never erases what you paid.
+  const since = (baseline && baseline.date) || "0000";
+  const cleared = (payments || []).filter(p => p.date >= since).reduce((t, p) => t + Math.max(0, net(p)), 0);
+  const pct = start > 0 ? Math.min(100, (cleared / start) * 100) : 0;
   const byId = Object.fromEntries((oblig || []).map(o => [o.id, o]));
-  // Today's moves
+  // Today's moves — never with names or initials of the people you're repaying.
   const moves = {};
   (payments || []).filter(p => p.date === date && net(p) > 0).forEach(p => {
     const o = byId[p.obligId] || {};
@@ -506,11 +510,13 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   const lastBorrow = (oblig || []).map(o => o.addedOn || o.startDate || "").filter(Boolean).sort().pop();
   const noBorrowDays = lastBorrow ? Math.max(0, Math.round((new Date(date + "T00:00:00") - new Date(lastBorrow + "T00:00:00")) / 86400000)) : null;
   const total = (oblig || []).length, closed = total - open.length;
+  const openLoans = open.filter(o => o.type !== "family" && !o.isCreditCard).length, // a card you pay off monthly isn't a debt to clear
+    openFam = open.filter(o => o.type === "family").length;
   const monthSpend = (expenses || []).filter(e => (e.date || "").slice(0, 7) === date.slice(0, 7) && e.date <= date).reduce((t, e) => t + (+e.amount || 0), 0);
   const monthKey = date.slice(0, 7);
   const monthRepaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === monthKey && p.date <= date).reduce((t, p) => t + net(p), 0);
   const monthClosed = (oblig || []).filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === monthKey && o.closedAt <= date).length;
-  return { date, owed, start, startDate: baseline && baseline.date, cleared, pct, moveList, monthRepaid, monthClosed, noSpend, todaySpend, next, streak, noBorrowDays, total, closed, budget: +budget || 0, monthSpend };
+  return { date, owed, start, startDate: baseline && baseline.date, cleared, pct, moveList, monthRepaid, monthClosed, openLoans, openFam, noSpend, todaySpend, next, streak, noBorrowDays, total, closed, budget: +budget || 0, monthSpend };
 }
 const localDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -530,7 +536,8 @@ export function drawClearingLog(canvas, snap, { dayNumber, quote, hide = false }
   highlight(ctx, "DEBT CLEARED", L + 10, y, "#BFD98A", { size: 42 });
   text(ctx, `since ${since}`, R, y, { size: 28, color: INK_SOFT, align: "right" });
   y += 150;
-  const pctLabel = snap.pct > 0 && snap.pct < 1 ? "<1%" : (snap.pct < 10 ? snap.pct.toFixed(1) : Math.round(snap.pct)) + "%";
+  // Early on the % is tiny against ₹1 Cr+ — show enough decimals that each repayment visibly moves it.
+  const pctLabel = (snap.pct === 0 ? "0" : snap.pct < 1 ? snap.pct.toFixed(2) : snap.pct < 10 ? snap.pct.toFixed(1) : Math.round(snap.pct)) + "%";
   text(ctx, pctLabel, L + 4, y, { size: 150, weight: 700, color: "#2E7D5B" });
   ctx.font = f(150, 700); const pw = ctx.measureText(pctLabel).width;
   text(ctx, HIDE ? "of what I owed" : `${inr(snap.cleared)} gone`, L + pw + 36, y - 70, { size: 36, weight: 700, maxW: R - L - pw - 40 });
@@ -539,7 +546,9 @@ export function drawClearingLog(canvas, snap, { dayNumber, quote, hide = false }
   ctx.save(); roundRect(ctx, L, y, R - L, 30, 15); ctx.fillStyle = "#EFE6CF"; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.stroke();
   const fw = Math.max(30, (R - L) * Math.min(1, snap.pct / 100)); roundRect(ctx, L, y, fw, 30, 15); ctx.fillStyle = "#74B85C"; ctx.fill(); ctx.restore();
   y += 76;
-  text(ctx, `${snap.closed} of ${snap.total} debts closed`, L + 4, y, { size: 34, weight: 700 });
+  const parts = [snap.openLoans ? `${snap.openLoans} loan${snap.openLoans > 1 ? "s" : ""}` : "", snap.openFam ? `${snap.openFam} family & friends` : ""].filter(Boolean).join(" + ");
+  text(ctx, `${snap.openLoans + snap.openFam} left${parts ? ": " + parts : ""}`, L + 4, y, { size: 32, weight: 700, maxW: R - L - 250 });
+  text(ctx, `${snap.closed} closed so far`, R, y, { size: 28, color: INK_SOFT, align: "right" });
 
   const qm = measureQuote(ctx, quote, L, R);
   const quoteTop = SAFE_BOTTOM - qm.h;
@@ -561,7 +570,7 @@ export function drawClearingLog(canvas, snap, { dayNumber, quote, hide = false }
     const yy = y + i * rowH;
     const amt = m.amount == null ? "✓" : HIDE ? (m.count > 1 ? "×" + m.count : "✓") : inr(m.amount);
     ctx.font = f(fs + 2, 700); const aw = ctx.measureText(amt).width;
-    text(ctx, `${m.icon}  ${m.label}${m.closed ? ` · ${m.closed} closed 🎉` : ""}`, L + 6, yy, { size: fs, maxW: R - L - aw - 30 });
+    text(ctx, `${m.icon}  ${m.label}${m.count > 1 ? ` (${m.count})` : ""}${m.closed ? ` · ${m.closed} closed 🎉` : ""}`, L + 6, yy, { size: fs, maxW: R - L - aw - 30 });
     text(ctx, amt, R, yy, { size: fs + 2, weight: 700, align: "right", color: m.amount == null ? "#2E7D5B" : INK });
     dottedRule(ctx, L, R, yy + 18);
   });

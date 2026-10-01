@@ -138,6 +138,17 @@ function jarInvestPlan(wc, balance) {
   const a = Math.round((total * shareA) / 100) * 100;
   return { total, a, b: total - a };
 }
+// What's in the jar, from its own ledger: everything logged minus everything invested. The jar
+// account's balance can hold other money too (or none, when the jar money stays in the source
+// account), so it isn't used for this.
+function jarBalance(wc) {
+  const inn = (wc?.history || []).reduce((t, h) => t + (+h.amount || 0), 0);
+  const out = (wc?.invested || []).reduce((t, x) => t + (+x.a || 0) + (+x.b || 0), 0);
+  return Math.max(0, Math.round(inn - out));
+}
+// Where the jar's money physically sits: "stay" = it stays in the source account (Kotak) and the
+// jar is just a reserved tally — no daily transfers; "move" = moved into the jar account each day.
+const jarStays = (wc) => wc?.hold === "stay";
 function buildUpiLink(vpa, amount, note) {
   return `upi://pay?pa=${encodeURIComponent(vpa)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note || "War chest")}`;
 }
@@ -546,7 +557,7 @@ export default function Clearing({ userId }) {
     const acc = accounts.find(a => a.warChest?.on);
     if (!acc) return null;
     const wc = acc.warChest, nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
-    return { balance: +acc.balance || 0, lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 1) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
+    return { balance: jarBalance(wc), lot: +wc.investLot || 500, perAction: +(wc.perAction ?? 1) || 1, history: wc.history || [], invested: wc.invested || [], fundAName: nameOf(wc.fundAId), fundBName: nameOf(wc.fundBId) };
   }, [accounts]);
   // The starting line for "how much of my debt is gone": set once (today, what's open now) and editable in Settings.
   const owedNow = oblig.filter(o => o.status !== "closed" && o.status !== "settled").reduce((t, o) => t + (+o.outstanding || 0), 0);
@@ -585,8 +596,10 @@ export default function Clearing({ userId }) {
     .map(o => ({ ...o, in: dueInDays(o, payments), ...overdueInfo(o, payments) }))
     .filter(o => +o.monthly > 0 && (o.overdue || (o.in !== null && o.in <= REMIND_DAYS)))
     .sort((a, b) => (b.overdue ? 1 : 0) - (a.overdue ? 1 : 0) || a.in - b.in);
+  const jarAcc = accounts.find(a => a.warChest?.on);
+  const jarReserved = jarAcc ? jarBalance(jarAcc.warChest) : 0;
   const setAside = dueSoon.reduce((s, o) => s + (+o.monthly || 0), 0);
-  const safeToSpend = moneyInHand - setAside - (+settings.buffer || 0);
+  const safeToSpend = moneyInHand - setAside - jarReserved - (+settings.buffer || 0);
   const monthKey = localMonth();
   const monthExp = expenses.filter(e => e.date.slice(0, 7) === monthKey);
   const monthSpend = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
@@ -623,8 +636,9 @@ export default function Clearing({ userId }) {
     const amt = byEng ? jarAmountFromEngagement(acc.warChest, e) : (+acc.warChest.target || 0);
     const entry = { date: today, amount: amt, ...(byEng ? { base: +(acc.warChest.base ?? 25) || 0, ...e, forPost: addDaysStr(today, -1) } : {}) };
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
-      if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
+      const stay = jarStays(acc.warChest);
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + (stay ? 0 : amt), warChest: { ...a.warChest, ...step, history: [...(a.warChest.history || []), entry].slice(-400) } };
+      if (!stay && a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
       return a;
     }));
     const lead = `₹${amt} into your jar`;
@@ -638,8 +652,9 @@ export default function Clearing({ userId }) {
     if (!acc || !acc.warChest?.on || amt <= 0) return;
     const entry = { date: postDay(), amount: amt, topUp: true };
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + amt, warChest: { ...a.warChest, history: [...(a.warChest.history || []), entry].slice(-400) } };
-      if (a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
+      const stay = jarStays(acc.warChest);
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) + (stay ? 0 : amt), warChest: { ...a.warChest, history: [...(a.warChest.history || []), entry].slice(-400) } };
+      if (!stay && a.id === acc.warChest.fromAccountId) return { ...a, balance: (+a.balance || 0) - amt };
       return a;
     }));
     setCelebrate(`₹${amt} topped up into your jar.`);
@@ -649,11 +664,14 @@ export default function Clearing({ userId }) {
   function investJar(accountId) {
     const acc = accounts.find(a => a.id === accountId);
     if (!acc || !acc.warChest?.on) return;
-    const p = jarInvestPlan(acc.warChest, acc.balance);
-    if (!p) return;
     const wc = acc.warChest;
+    const p = jarInvestPlan(wc, jarBalance(wc));
+    if (!p) return;
+    // The money leaves wherever it actually sits: the source account when the jar stays there.
+    const payFrom = jarStays(wc) && wc.fromAccountId ? wc.fromAccountId : accountId;
     setAccounts(list => list.map(a => {
-      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - p.total, warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: postDay(), a: p.a, b: p.b }].slice(-200) } };
+      if (a.id === accountId) return { ...a, balance: (+a.balance || 0) - (payFrom === accountId ? p.total : 0), warChest: { ...a.warChest, invested: [...(a.warChest.invested || []), { date: postDay(), a: p.a, b: p.b }].slice(-200) } };
+      if (a.id === payFrom) return { ...a, balance: (+a.balance || 0) - p.total };
       if (a.id === wc.fundAId) return { ...a, ...growAfterMove(a, p.a), balance: (+a.balance || 0) + p.a };
       if (p.b && a.id === wc.fundBId) return { ...a, ...growAfterMove(a, p.b), balance: (+a.balance || 0) + p.b };
       return a;
@@ -797,7 +815,7 @@ export default function Clearing({ userId }) {
           <WantsCard wants={wantsList} picks={picks} nextHint={nextWantHint} onOpen={() => setWantsOpen(true)} />
         </div>
       )}
-      {tab === "home" && <Home {...{ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
+      {tab === "home" && <Home {...{ moneyInHand, setAside, jarReserved, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
       {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
       {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, planExtra, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
@@ -857,8 +875,9 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   const today = postDay();
   const alreadyLogged = !nextWarChestLog(wc, today);
   const amt = byEng ? jarAmountFromEngagement(wc, eng) : (+wc.target || 0);
-  const upiLink = wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byEng ? "Engagement jar" : "Jar") : null;
-  const plan = jarInvestPlan(wc, wcAccount.balance);
+  const upiLink = !jarStays(wc) && wc.vpa && amt > 0 ? buildUpiLink(wc.vpa, amt, byEng ? "Engagement jar" : "Jar") : null;
+  const jarBal = jarBalance(wc);
+  const plan = jarInvestPlan(wc, jarBal);
   const nameOf = (id) => (accounts.find(a => a.id === id) || {}).name || "";
   const hist = (wc.history || []).slice(-5).reverse();
   const fmt = (n) => new Intl.NumberFormat("en-IN").format(+n || 0);
@@ -867,11 +886,11 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <div className="lbl" style={{ margin: 0 }}>{byEng ? "Engagement jar" : "Jar"} — {wcAccount.name}</div>
+        <div className="lbl" style={{ margin: 0 }}>{byEng ? "Engagement jar" : "Jar"} — {jarStays(wc) ? (nameOf(wc.fromAccountId) || wcAccount.name) : wcAccount.name}</div>
         {wc.streak > 1 && <span className="chip" style={{ background: C.violet, color: "#fff" }}>{wc.streak} {wc.cadence === "weekly" ? "weeks" : "days"} running</span>}
       </div>
-      <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(wcAccount.balance)}</div>
-      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>in the jar, waiting to be invested</div>
+      <div className="num" style={{ fontSize: 26, fontWeight: 700, marginTop: 4 }}>{inr(jarBal)}</div>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{jarStays(wc) ? `set aside in ${nameOf(wc.fromAccountId) || "your bank"} (kept out of safe-to-spend) until it's invested` : "in the jar, waiting to be invested"}</div>
       {byEng && !alreadyLogged && (
         <div style={{ marginTop: 10 }}>
           <span className="lbl">Yesterday's post ({new Date(addDaysStr(today, -1) + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}) — its reactions go in today</span>
@@ -910,10 +929,10 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
           Invest ₹{plan.a} → {nameOf(wc.fundAId)}{plan.b ? ` + ₹${plan.b} → ${nameOf(wc.fundBId)}` : ""}
         </button>
       )}
-      {!plan && wc.fundAId && (+wcAccount.balance || 0) > 0 && (
-        <div className="sub" style={{ marginTop: 8 }}>{inr((+wc.investLot || 500) - ((+wcAccount.balance || 0) % (+wc.investLot || 500)))} more and it's time to invest.</div>
+      {!plan && wc.fundAId && jarBal > 0 && (
+        <div className="sub" style={{ marginTop: 8 }}>{inr((+wc.investLot || 500) - (jarBal % (+wc.investLot || 500)))} more and it's time to invest.</div>
       )}
-      {!wc.fundAId && (+wcAccount.balance || 0) > 0 && (
+      {!wc.fundAId && jarBal > 0 && (
         <button className="btn ghost" onClick={() => setTab("clear")} style={{ marginTop: 8, width: "100%", justifyContent: "center", fontSize: 12 }}>Apply it to a debt →</button>
       )}
       {hist.length > 0 && (
@@ -929,7 +948,7 @@ function JarCard({ wcAccount, accounts, logWarChest, investJar, topUpJar, setTab
   );
 }
 
-function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
+function Home({ moneyInHand, setAside, jarReserved = 0, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }) {
   const wcAccount = accounts.find(a => a.warChest?.on);
   return (
     <div style={{ display: "grid", gap: 14 }}>
@@ -952,6 +971,7 @@ function Home({ moneyInHand, setAside, safeToSpend, settings, setSettings, dueSo
         <div style={{ marginTop: 12, display: "grid", gap: 6, fontSize: 13 }}>
           <Line l="Money in hand" v={inr(moneyInHand)} c={C.text} />
           <Line l={"Due within " + REMIND_DAYS + " days"} v={"− " + inr(setAside)} c={C.amber} />
+          {jarReserved > 0 && <Line l="In the jar (not yet invested)" v={"− " + inr(jarReserved)} c={C.violet} />}
           <Line l="Buffer you keep aside (Settings)" v={"− " + inr(settings.buffer)} c={C.muted} />
         </div>
       </div>
@@ -2254,7 +2274,7 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
       </div>
       {a.warChest?.on && (
         <div className="panel" style={{ display: "grid", gap: 8 }}>
-          <div className="sub">Small, steady amounts set aside here, then moved into your funds.</div>
+          <div className="sub">Small, steady amounts set aside{jarStays(a.warChest) ? "" : " here"}, then moved into your funds.</div>
           <Seg options={[["fixed", "Fixed amount"], ["engage", "Base + engagement"]]} value={isEngage(a.warChest) ? "engage" : "fixed"}
             onChange={(v) => upd({ warChest: { ...a.warChest, mode: v, ...(v === "engage" ? { cadence: "daily", base: a.warChest.base ?? 25, perAction: a.warChest.perAction ?? 1, dailyCap: a.warChest.dailyCap || 100 } : {}) } })} />
           {!isEngage(a.warChest) ? (
@@ -2284,7 +2304,24 @@ function AccountSheet({ account: a, startOnUpdate, accounts, setAccounts, logExp
             <option value="">Second fund (optional)…</option>
             {accounts.filter(x => x.id !== a.id && x.id !== a.warChest.fundAId).map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
           </select>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <span className="lbl" style={{ margin: 0, flex: 1 }}>Invest once the jar reaches ₹</span>
+            <input className="in num" style={{ width: 110 }} type="number" step="100" min="100" value={a.warChest.investLot || 500} onChange={e => upd({ warChest: { ...a.warChest, investLot: Math.max(100, Math.round((+e.target.value || 500) / 100) * 100) } })} />
+          </div>
           <div className="sub">The jar is invested in whole ₹{a.warChest.investLot || 500} lots, {Math.round((a.warChest.fundAShare ?? 0.8) * 100)}% to the main fund and the rest to the second.</div>
+          <span className="lbl" style={{ marginTop: 4 }}>Where the jar money sits until it's invested</span>
+          <Seg options={[["stay", `Stays in ${(accounts.find(x => x.id === a.warChest.fromAccountId) || {}).name || "source"}`], ["move", `Moved to ${a.name}`]]} value={jarStays(a.warChest) ? "stay" : "move"}
+            onChange={(v) => {
+              if ((v === "stay") === jarStays(a.warChest)) return;
+              // Switching moves what's already in the jar to where it will now sit, so balances stay true.
+              const amt = jarBalance(a.warChest), from = a.warChest.fromAccountId;
+              setAccounts(list => list.map(x => {
+                if (x.id === a.id) return { ...x, balance: (+x.balance || 0) + (v === "stay" ? -amt : amt), warChest: { ...x.warChest, hold: v } };
+                if (from && x.id === from) return { ...x, balance: (+x.balance || 0) + (v === "stay" ? amt : -amt) };
+                return x;
+              }));
+            }} />
+          <div className="sub">{jarStays(a.warChest) ? "No daily transfers: the jar is a running tally, held back from safe-to-spend. When it hits the amount above, it goes straight from that account into the funds." : "Each day's amount is moved into this account, then from here into the funds."}</div>
           {accounts.length > 1 && (
             <select className="in" value={a.warChest.fromAccountId || ""} onChange={e => upd({ warChest: { ...a.warChest, fromAccountId: e.target.value } })}>
               <option value="">Comes out of…</option>
