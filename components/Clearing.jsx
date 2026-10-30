@@ -464,7 +464,14 @@ export default function Clearing({ userId }) {
     (async () => {
       const today = new Date().toDateString();
       if (localStorage.getItem("clr2:lastNotify") === today) return;
-      const soon = oblig.filter(o => o.status !== "closed" && o.status !== "settled" && daysUntil(o.dueDay) !== null && daysUntil(o.dueDay) <= REMIND_DAYS && +o.monthly > 0);
+      // Same rule as the reminder email: skip cleared/settled debts, anything with nothing left to
+      // pay, and loans whose first payment (startsOn) comes after this due date.
+      const soon = oblig.filter(o => {
+        if (o.status === "closed" || o.status === "settled" || !((+o.outstanding || 0) > 0) || !(+o.monthly > 0)) return false;
+        const n = daysUntil(o.dueDay);
+        if (n === null || n > REMIND_DAYS) return false;
+        return !notStartedYet(o, localDay(new Date(Date.now() + n * 86400000)));
+      });
       soon.forEach(o => { const n = daysUntil(o.dueDay); try { new Notification("Due " + (n === 0 ? "today" : "in " + n + "d") + " · " + o.name, { body: inr(o.monthly) }); } catch {} });
       if (soon.length) localStorage.setItem("clr2:lastNotify", today);
     })();

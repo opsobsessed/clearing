@@ -3,13 +3,20 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 const REMIND_DAYS = 10;
 
-function daysUntil(day) {
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// Next due date for a monthly due day: { in: days from today, date: "YYYY-MM-DD" }.
+function nextDue(day) {
   if (!day) return null;
   const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+  const today = new Date(y, m, now.getDate());
   let d = new Date(y, m, day);
-  if (d < new Date(y, m, now.getDate())) d = new Date(y, m + 1, day);
-  return Math.round((d - new Date(y, m, now.getDate())) / 86400000);
+  if (d < today) d = new Date(y, m + 1, day);
+  return { in: Math.round((d - today) / 86400000), date: ymd(d) };
 }
+// Only debts still being paid off: not cleared, not settled (closed for less), with something left
+// to pay. Matches what the app itself treats as open — "settled" used to slip through here.
+const stillOwed = (o) =>
+  o.status !== "closed" && o.status !== "settled" && (+o.outstanding || 0) > 0 && +o.monthly > 0;
 const inr = (n) => "\u20B9" + new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.round(n || 0));
 
 export async function GET(request) {
@@ -27,9 +34,11 @@ export async function GET(request) {
   for (const row of rows || []) {
     const obligs = (row.data && row.data.oblig) || [];
     const due = obligs
-      .filter((o) => o.status !== "closed" && +o.monthly > 0)
-      .map((o) => ({ ...o, in: daysUntil(o.dueDay) }))
-      .filter((o) => o.in !== null && o.in <= REMIND_DAYS)
+      .filter(stillOwed)
+      .map((o) => ({ ...o, next: nextDue(o.dueDay) }))
+      // A loan with a future start date isn't due until its first payment (e.g. starts 5 Dec).
+      .filter((o) => o.next && o.next.in <= REMIND_DAYS && !(o.startsOn && o.next.date < o.startsOn))
+      .map((o) => ({ ...o, in: o.next.in }))
       .sort((a, b) => a.in - b.in);
     if (due.length === 0) continue;
 
