@@ -172,6 +172,8 @@ function cardDueDate(o, payments) {
   return null;
 }
 const daysBetween = (a, b) => Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
+// What a due date asks you to pay: a card's whole bill (everything spent on it), otherwise the monthly amount.
+const dueAmount = (o) => o.isCreditCard ? (+o.outstanding || 0) : (+o.monthly || 0);
 // A loan can have a date its repayments start (e.g. a new loan with EMIs from December). Before
 // then it's never "due" or "overdue", and the salary plan doesn't budget for it.
 const notStartedYet = (o, onDate = localDay()) => !!o.startsOn && onDate < o.startsOn;
@@ -459,23 +461,6 @@ export default function Clearing({ userId }) {
   }, [ready, userId]);
   useEffect(() => { if (!celebrate) return; const t = setTimeout(() => setCelebrate(null), 4000); return () => clearTimeout(t); }, [celebrate]);
 
-  useEffect(() => {
-    if (!ready || notif !== "granted") return;
-    (async () => {
-      const today = new Date().toDateString();
-      if (localStorage.getItem("clr2:lastNotify") === today) return;
-      // Same rule as the reminder email: skip cleared/settled debts, anything with nothing left to
-      // pay, and loans whose first payment (startsOn) comes after this due date.
-      const soon = oblig.filter(o => {
-        if (o.status === "closed" || o.status === "settled" || !((+o.outstanding || 0) > 0) || !(+o.monthly > 0)) return false;
-        const n = daysUntil(o.dueDay);
-        if (n === null || n > REMIND_DAYS) return false;
-        return !notStartedYet(o, localDay(new Date(Date.now() + n * 86400000)));
-      });
-      soon.forEach(o => { const n = daysUntil(o.dueDay); try { new Notification("Due " + (n === 0 ? "today" : "in " + n + "d") + " · " + o.name, { body: inr(o.monthly) }); } catch {} });
-      if (soon.length) localStorage.setItem("clr2:lastNotify", today);
-    })();
-  }, [ready, notif, oblig]);
 
   // Shared by Quick add and the Accounts tab so an entry always updates the account balance too.
   // A spend paid by credit card ("card:<debt id>") adds to that card's outstanding on Clear instead
@@ -609,13 +594,27 @@ export default function Clearing({ userId }) {
   }, [ready, settings.wantsSince, planResult.bal, planResult.starter, planResult.full, postStreak]);
   const moneyInHand = accounts.filter(a => !isGrow(a)).reduce((s, a) => s + (+a.balance || 0), 0);
   const openOblig = oblig.filter(o => o.status !== "closed" && o.status !== "settled");
+  // Cleared and settled debts are never due; loans that haven't started count from their start date
+  // (dueInDays); a credit card is due for its whole bill on its statement due date.
   const dueSoon = openOblig
-    .map(o => ({ ...o, in: dueInDays(o, payments), ...overdueInfo(o, payments) }))
-    .filter(o => +o.monthly > 0 && (o.overdue || (o.in !== null && o.in <= REMIND_DAYS)))
+    .filter(o => (+o.outstanding || 0) > 0)
+    .map(o => ({ ...o, amount: dueAmount(o), in: dueInDays(o, payments), ...overdueInfo(o, payments) }))
+    .filter(o => o.amount > 0 && (o.overdue || (o.in !== null && o.in <= REMIND_DAYS)))
     .sort((a, b) => (b.overdue ? 1 : 0) - (a.overdue ? 1 : 0) || a.in - b.in);
+  // Phone notifications for the same list, once a day.
+  useEffect(() => {
+    if (!ready || notif !== "granted") return;
+    const today = new Date().toDateString();
+    try { if (localStorage.getItem("clr2:lastNotify") === today) return; } catch { return; }
+    dueSoon.forEach(o => {
+      const when = o.overdue ? "Overdue" : "Due " + (o.in === 0 ? "today" : "in " + o.in + "d");
+      try { new Notification(when + " · " + o.name, { body: inr(o.amount) }); } catch {}
+    });
+    if (dueSoon.length) { try { localStorage.setItem("clr2:lastNotify", today); } catch {} }
+  }, [ready, notif, oblig, payments]);
   const jarAcc = accounts.find(a => a.warChest?.on);
   const jarReserved = jarAcc ? jarBalance(jarAcc.warChest) : 0;
-  const setAside = dueSoon.reduce((s, o) => s + (+o.monthly || 0), 0);
+  const setAside = dueSoon.reduce((s, o) => s + o.amount, 0);
   const safeToSpend = moneyInHand - setAside - jarReserved - (+settings.buffer || 0);
   const monthKey = localMonth();
   const monthExp = expenses.filter(e => e.date.slice(0, 7) === monthKey);
@@ -833,7 +832,13 @@ export default function Clearing({ userId }) {
         </div>
       )}
       {tab === "home" && <Home {...{ moneyInHand, setAside, jarReserved, safeToSpend, settings, setSettings, dueSoon, monthSpend, debtPlan, accounts, logWarChest, investJar, topUpJar, freedMonthly, paydayUnderControl, openFamily, setTab, prioritizeFamily }} />}
-      {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand }} openQuickAdd={(m) => setQuickAdd(m)} />}
+      {tab === "accounts" && <AccountsTab {...{ accounts, setAccounts, incomes, logExpense, logIncome, moneyInHand, payments }} openQuickAdd={(m) => setQuickAdd(m)}
+        cards={oblig.filter(o => o.isCreditCard && o.status !== "settled")}
+        onPayCard={(id, amt, acc, note) => {
+          const card = oblig.find(o => o.id === id);
+          payDebt(id, amt, acc, note);
+          setCelebrate(amt >= (+card?.outstanding || 0) ? `${card.name.trim()} bill paid in full.` : `Paid ${inr(amt)} toward ${card.name.trim()}.`);
+        }} />}
       {tab === "money" && <MoneyTab {...{ expenses, setExpenses, payments, incomes, setIncomes, oblig, setOblig, accounts, setAccounts, settings, setSettings, setTab }} />}
       {tab === "clear" && <Clear {...{ oblig, setOblig, accounts, setAccounts, payments, setPayments, expenses, planExtra, onCelebrate: setCelebrate, settings, setSettings, safeToSpend }} />}
       {tab === "clear" && <RepaymentsBreakdown {...{ payments, oblig }} />}
@@ -1001,7 +1006,7 @@ function Home({ moneyInHand, setAside, jarReserved = 0, safeToSpend, settings, s
               <div><div style={{ fontWeight: 500, fontSize: 14 }}>{o.name}</div>
                 <div style={{ fontSize: 12, color: OTYPE[o.type].color }}>{OTYPE[o.type].short}</div></div>
               <div className="row" style={{ gap: 10 }}>
-                <span className="num" style={{ fontWeight: 600 }}>{inr(o.monthly)}</span>
+                <span className="num" style={{ fontWeight: 600 }}>{inr(o.amount)}</span>
                 {o.overdue ? (
                   <span className="chip" style={{ background: C.coral, color: "#fff", textAlign: "center", whiteSpace: "nowrap" }}>overdue</span>
                 ) : (
@@ -1685,9 +1690,9 @@ function ObligForm({ onSave, onCancel }) {
     </div>
   );
 }
-function PayForm({ accounts, onPay, onCancel }) {
-  const [amt, setAmt] = useState("");
-  const [acc, setAcc] = useState(accounts.find(a => a.purpose === "debt")?.id || accounts[0]?.id || "");
+function PayForm({ accounts, onPay, onCancel, initialAmt, initialAcc }) {
+  const [amt, setAmt] = useState(initialAmt ? String(initialAmt) : "");
+  const [acc, setAcc] = useState(initialAcc || accounts.find(a => a.purpose === "debt")?.id || accounts[0]?.id || "");
   const [note, setNote] = useState("");
   return (
     <div style={{ marginTop: 10, display: "grid", gap: 8, background: C.surface2, padding: 12, borderRadius: 12 }}>
@@ -1847,7 +1852,7 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
 
   // Unified list
   const items = [
-    ...expenses.map(e => ({ kind: "expense", id: e.id, date: e.date, amount: +e.amount || 0, label: e.cat || "Spending", sub: [e.note, e.cardId ? "💳 " + nameOf(e.cardId, oblig).trim() : nameOf(e.accountId, accounts)].filter(Boolean).join(" · "), item: e, cat: e.cat })),
+    ...expenses.map(e => ({ kind: "expense", id: e.id, date: e.date, amount: +e.amount || 0, label: e.cat || "Spending", sub: [e.note, e.cardId ? "💳 " + (nameOf(e.cardId, oblig).trim() || "Credit card") : nameOf(e.accountId, accounts)].filter(Boolean).join(" · "), item: e, cat: e.cat })),
     ...payments.map(p => ({ kind: "repay", id: p.id, date: p.date, amount: +p.amount || 0, label: "Paid " + (nameOf(p.obligId, oblig).trim() || "a debt"), sub: [p.coversSpends ? inr(p.coversSpends) + " of it covers card spends already counted" : "", p.note, nameOf(p.accountId, accounts)].filter(Boolean).join(" · "), item: p, cat: "Loan repayments" })),
     ...incomes.map(i => ({ kind: "income", id: i.id, date: i.date, amount: +i.amount || 0, label: incomeSourceLabel(i), sub: [i.note, nameOf(i.accountId, accounts)].filter(Boolean).join(" · "), item: i })),
   ].filter(it => filter === "all" || (filter === "spent" && it.kind === "expense") || (filter === "repay" && it.kind === "repay") || (filter === "in" && it.kind === "income"))
@@ -1857,13 +1862,67 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
   items.forEach(it => { const g = groups.find(x => x.date === it.date); if (g) g.rows.push(it); else groups.push({ date: it.date, rows: [it] }); });
   const shown = groups.slice(0, days);
 
+  // How an entry was paid: the account or card name, plus whether that's an account, cash or a card.
+  function viaOf(accountId, cardId) {
+    if (cardId) {
+      const card = oblig.find(o => o.id === cardId);
+      return { via: (card && card.name.trim()) || "Credit card (removed)", method: "Credit card" };
+    }
+    const acc = accounts.find(a => a.id === accountId);
+    if (!acc) return { via: "Not recorded", method: "" };
+    return { via: acc.name.trim(), method: acc.isCash ? "Cash" : "Account" };
+  }
+
   function downloadMonth() {
-    const rows = [["Date", "Type", "Category / Debt / Source", "Amount", "Note"]];
-    expenses.filter(e => inMonth(e, monthKey)).forEach(e => rows.push([e.date, "Spent", e.cat, e.amount, e.note || ""]));
-    payments.filter(p => inMonth(p, monthKey)).forEach(p => rows.push([p.date, "Repayment", nameOf(p.obligId, oblig), p.amount, p.note || ""]));
-    incomes.filter(i => inMonth(i, monthKey)).forEach(i => rows.push([i.date, "In", incomeSourceLabel(i), i.amount, i.note || ""]));
+    const rows = [];
+    const byVia = {};
+    const tally = (v, key, amt) => {
+      byVia[v.via] = byVia[v.via] || { via: v.via, method: v.method, spent: 0, repaid: 0, cardBill: 0 };
+      byVia[v.via][key] += +amt || 0;
+    };
+    expenses.filter(e => inMonth(e, monthKey)).forEach(e => {
+      const v = viaOf(e.accountId, e.cardId);
+      rows.push([e.date, e.cardId ? "Spent on card" : "Spent", e.cat || "Other", e.amount, v.via, v.method, e.note || ""]);
+      tally(v, "spent", e.amount);
+    });
+    payments.filter(p => inMonth(p, monthKey)).forEach(p => {
+      const debt = oblig.find(o => o.id === p.obligId);
+      const isCard = !!(debt && debt.isCreditCard);
+      const v = viaOf(p.accountId);
+      const note = [p.note, p.coversSpends ? `${inr(p.coversSpends)} of this pays off card spends already listed` : ""].filter(Boolean).join(" · ");
+      rows.push([p.date, isCard ? "Card bill paid" : "Repayment", nameOf(p.obligId, oblig).trim() || "a debt", p.amount, v.via, v.method, note]);
+      tally(v, isCard ? "cardBill" : "repaid", p.amount);
+    });
+    incomes.filter(i => inMonth(i, monthKey)).forEach(i => {
+      const v = viaOf(i.accountId);
+      rows.push([i.date, "In", incomeSourceLabel(i), i.amount, v.via, v.method, i.note || ""]);
+    });
     rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+
+    const summary = Object.values(byVia)
+      .sort((a, b) => (b.spent + b.repaid + b.cardBill) - (a.spent + a.repaid + a.cardBill))
+      .map(s => [s.via, s.method, s.spent, s.repaid, s.cardBill]);
+    const cardsOwed = oblig
+      .filter(o => o.isCreditCard && o.status !== "closed" && o.status !== "settled" && (+o.outstanding || 0) > 0)
+      .map(o => [o.name.trim(), +o.outstanding || 0, cardDueDate(o, payments) || ""]);
+
+    const out = [
+      ["Date", "Type", "Category / Debt / Source", "Amount", "Paid via (or received in)", "Method", "Note"],
+      ...rows,
+      [],
+      ["How you paid this month"],
+      ["Paid via", "Method", "Spent", "Loan repayments", "Card bills paid"],
+      ...summary,
+      ...(cardsOwed.length ? [
+        [],
+        ["Card bills still to repay (as of today)"],
+        ["Card", "To repay", "Due on"],
+        ...cardsOwed,
+        ["Card spends are counted once, under the card. The bill payment shows under the account you paid it from, so don't add the two together."],
+      ] : []),
+    ];
+    // The leading BOM makes Excel read ₹ and other non-English text correctly.
+    const csv = "﻿" + out.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = `clearing-${monthKey}.csv`; a.click();
   }
 
@@ -2119,9 +2178,17 @@ function RepaymentsBreakdown({ payments, oblig }) {
 /* ================================================================================================
    ACCOUNTS
    ================================================================================================ */
-function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, openQuickAdd, moneyInHand }) {
+function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, openQuickAdd, moneyInHand, payments = [], cards = [], onPayCard }) {
   const [open, setOpen] = useState(null);      // account id for the detail sheet
   const [mode, setMode] = useState(null);      // 'move' | 'pickUpdate' | 'add'
+  const [payCardId, setPayCardId] = useState(null);
+  // Card spends are owed until the bill is paid, so show what's left once that's set aside.
+  const cardOwed = sum(cards.filter(c => c.status !== "closed"), c => +c.outstanding || 0);
+  const afterCards = moneyInHand - cardOwed;
+  const shortDay = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  const payCard = cards.find(c => c.id === payCardId);
+  // Default to the account this card was last paid from.
+  const lastPaidFrom = payCard && [...payments].filter(p => p.obligId === payCard.id && p.accountId).sort((a, b) => (a.date < b.date ? 1 : -1))[0]?.accountId;
   const monthIn = sum(incomes.filter(i => (i.date || "").slice(0, 7) === localMonth()), i => i.amount);
   const byPurpose = Object.keys(PURPOSE).filter(p => p !== "grow").map(p => ({ p, total: sum(accounts.filter(a => a.purpose === p), a => a.balance) }));
   const growing = accounts.filter(isGrow);
@@ -2143,6 +2210,11 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
           {byPurpose.map(x => <span key={x.p}><span className="dot" style={{ background: PURPOSE[x.p].color }} />{PURPOSE[x.p].short} {inr(x.total)}</span>)}
         </div>
         <div className="sub" style={{ marginTop: 10 }}>{inr(monthIn)} came in this month</div>
+        {cardOwed > 0 && (
+          <div className="sub" style={{ marginTop: 4 }}>
+            <span className="num" style={{ fontWeight: 600, color: afterCards < 0 ? C.coral : C.text }}>{afterCards < 0 ? "−" : ""}{inr(Math.abs(afterCards))}</span> after card bills ({inr(cardOwed)})
+          </div>
+        )}
       </div>
 
       {growing.length > 0 && (
@@ -2196,6 +2268,40 @@ function AccountsTab({ accounts, setAccounts, incomes, logExpense, logIncome, op
         ))}
         <button className="li li-btn" onClick={() => setMode("add")} style={{ color: C.primary, fontWeight: 600 }}><span className="row" style={{ gap: 6 }}><Plus size={16} /> Add account</span><span /></button>
       </div>
+
+      {cards.length > 0 && (
+        <div className="card" style={{ padding: "6px 16px" }}>
+          <div className="lbl" style={{ paddingTop: 10 }}>Credit cards · to repay</div>
+          {cards.map(c => {
+            const owed = c.status === "closed" ? 0 : (+c.outstanding || 0);
+            const due = owed > 0 ? cardDueDate(c, payments) : null;
+            const late = due ? daysBetween(due, localDay()) : 0;
+            return (
+              <div key={c.id} className="li">
+                <div style={{ textAlign: "left" }}>
+                  <div style={{ fontSize: 15, fontWeight: 600 }}>{c.name}</div>
+                  <div className="sub" style={{ marginTop: 2, color: late > 0 ? C.coral : undefined }}>
+                    {owed <= 0 ? "Nothing to repay" : !due ? "Add the statement due date on the Clear tab" : late > 0 ? `Overdue since ${shortDay(due)}` : `Pay by ${shortDay(due)}`}
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 10 }}>
+                  <span className="num" style={{ fontSize: 19, color: owed > 0 ? C.coral : C.text }}>{inr(owed)}</span>
+                  {owed > 0 && onPayCard && (
+                    <button className="chip" onClick={() => setPayCardId(c.id)} style={{ background: late > 0 ? C.coral : C.primary, color: "#fff", cursor: "pointer", whiteSpace: "nowrap" }}>Pay bill</button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {payCard && (
+        <Sheet title={`Pay ${payCard.name.trim()} bill`} onClose={() => setPayCardId(null)}>
+          <PayForm accounts={spendable} initialAmt={+payCard.outstanding || 0} initialAcc={spendable.some(a => a.id === lastPaidFrom) ? lastPaidFrom : undefined}
+            onPay={(amt, acc, note) => { onPayCard(payCard.id, amt, acc, note); setPayCardId(null); }} onCancel={() => setPayCardId(null)} />
+          <div className="foot">Filled in with the full bill. Your card spends are already counted as spending, so paying the bill won't count them twice.</div>
+        </Sheet>
+      )}
 
       {mode === "move" && (
         <Sheet title="Move money" onClose={() => setMode(null)}>
