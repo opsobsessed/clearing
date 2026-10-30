@@ -60,8 +60,8 @@ export function buildSnapshot({ date, expenses, payments, incomes, oblig, source
   const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
   const debtName = (id) => ((oblig || []).find(o => o.id === id) || {}).name || "a debt";
   const todayItems = [
-    // A Loan Related spend is shown as debt repayment (never with a lender's name), not everyday spending.
-    ...(expenses || []).filter(e => e.date === date).map(e => ({ label: e.cat || "Spending", note: e.note || "", amount: +e.amount || 0, cat: isEveryday(e) ? e.cat : "Loan repayments" })),
+    // A Loan Related spend keeps its own label (it isn't necessarily a repayment) but isn't everyday spending.
+    ...(expenses || []).filter(e => e.date === date).map(e => ({ label: e.cat || "Spending", note: e.note || "", amount: +e.amount || 0, cat: e.cat, notEveryday: !isEveryday(e) })),
     ...(payments || []).filter(p => p.date === date && net(p) > 0).map(p => ({ label: "Paid " + debtName(p.obligId).trim(), note: "", amount: net(p), cat: "Loan repayments" })),
   ].sort((a, b) => b.amount - a.amount);
   const monthExp = (expenses || []).filter(e => (e.date || "").slice(0, 7) === month && e.date <= date && isEveryday(e));
@@ -83,7 +83,7 @@ export function buildSnapshot({ date, expenses, payments, incomes, oblig, source
   const monthLiving = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
   return {
     date, todayItems,
-    todayTotal: todayItems.filter(x => x.cat !== "Loan repayments").reduce((s, x) => s + x.amount, 0),
+    todayTotal: todayItems.filter(x => x.cat !== "Loan repayments" && !x.notEveryday).reduce((s, x) => s + x.amount, 0),
     monthTotal: cats.reduce((s, x) => s + x.value, 0),
     todayPaid, monthPaid,
     slices, sources,
