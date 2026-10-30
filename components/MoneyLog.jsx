@@ -10,6 +10,11 @@ import { X, Download, Share2 } from "lucide-react";
 
 const W = 1080, H = 1920;
 const FONT = "Kalam";
+
+// Spends in these categories are debt-related money going out, not everyday living: they're kept out
+// of everyday spending, the category chart, budgets and no-spend days, but still listed.
+export const NOT_EVERYDAY_CATS = ["loan related"];
+export const isEveryday = (e) => !NOT_EVERYDAY_CATS.includes(String((e && e.cat) || "").trim().toLowerCase());
 const INK = "#1F2A5C", INK_SOFT = "#4A5680", PAPER = "#FAF6EE", RULE = "#DCE6F2", MARGIN = "#F2B8B8";
 const SLICE_COLORS = ["#E5534B", "#F0923A", "#F5CE47", "#74B85C", "#4A90D9", "#8A6FC4", "#3FB5A8", "#E07BB0", "#A9CB58", "#9A9A9A"];
 const CAT_EMOJI = {
@@ -55,10 +60,11 @@ export function buildSnapshot({ date, expenses, payments, incomes, oblig, source
   const net = (p) => (+p.amount || 0) - (+p.coversSpends || 0);
   const debtName = (id) => ((oblig || []).find(o => o.id === id) || {}).name || "a debt";
   const todayItems = [
-    ...(expenses || []).filter(e => e.date === date).map(e => ({ label: e.cat || "Spending", note: e.note || "", amount: +e.amount || 0, cat: e.cat })),
+    // A Loan Related spend is shown as debt repayment (never with a lender's name), not everyday spending.
+    ...(expenses || []).filter(e => e.date === date).map(e => ({ label: e.cat || "Spending", note: e.note || "", amount: +e.amount || 0, cat: isEveryday(e) ? e.cat : "Loan repayments" })),
     ...(payments || []).filter(p => p.date === date && net(p) > 0).map(p => ({ label: "Paid " + debtName(p.obligId).trim(), note: "", amount: net(p), cat: "Loan repayments" })),
   ].sort((a, b) => b.amount - a.amount);
-  const monthExp = (expenses || []).filter(e => (e.date || "").slice(0, 7) === month && e.date <= date);
+  const monthExp = (expenses || []).filter(e => (e.date || "").slice(0, 7) === month && e.date <= date && isEveryday(e));
   // Debt repayments are always shown, but kept separate from everyday spending: they'd otherwise
   // swamp the chart (a single loan closure can be lakhs) and hide where everyday money goes.
   const monthPaid = (payments || []).filter(p => (p.date || "").slice(0, 7) === month && p.date <= date).reduce((s, p) => s + net(p), 0);
@@ -497,7 +503,7 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   });
   const moveList = Object.values(moves).sort((a, b) => b.amount - a.amount);
   // The jar has its own post (Jar tab), so it isn't listed here as a debt move.
-  const todaySpend = (expenses || []).filter(e => e.date === date).reduce((t, e) => t + (+e.amount || 0), 0);
+  const todaySpend = (expenses || []).filter(e => e.date === date && isEveryday(e)).reduce((t, e) => t + (+e.amount || 0), 0);
   const noSpend = todaySpend === 0;
   // Next up: the snowball target (pinned first, otherwise smallest friends & family balance)
   const fam = open.filter(o => o.type === "family" && (+o.outstanding || 0) > 0).sort((a, b) => {
@@ -507,7 +513,7 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   });
   const next = fam[0] ? { left: +fam[0].outstanding, months: ffMonthly > 0 ? Math.ceil(+fam[0].outstanding / ffMonthly) : null } : null;
   // Streaks
-  const acted = (d) => debtPays.some(p => p.date === d && net(p) > 0) || !(expenses || []).some(e => e.date === d);
+  const acted = (d) => debtPays.some(p => p.date === d && net(p) > 0) || !(expenses || []).some(e => e.date === d && isEveryday(e));
   // Streak only counts days since you started tracking (starting line, or your first entry).
   const firstDay = [baseline && baseline.date, ...(expenses || []).map(e => e.date), ...(payments || []).map(p => p.date)].filter(Boolean).sort()[0] || date;
   let streak = 0; { const d = new Date(date + "T00:00:00"); if (!acted(date)) d.setDate(d.getDate() - 1); for (let k = 0; k < 400 && localDate(d) >= firstDay && acted(localDate(d)); k++) { streak++; d.setDate(d.getDate() - 1); } }
@@ -516,7 +522,7 @@ export function buildClearingSnapshot({ date, expenses, payments, oblig, account
   const total = debts.length, closed = total - open.length;
   const openLoans = open.filter(o => o.type !== "family" && !o.isCreditCard).length, // a card you pay off monthly isn't a debt to clear
     openFam = open.filter(o => o.type === "family").length;
-  const monthSpend = (expenses || []).filter(e => (e.date || "").slice(0, 7) === date.slice(0, 7) && e.date <= date).reduce((t, e) => t + (+e.amount || 0), 0);
+  const monthSpend = (expenses || []).filter(e => (e.date || "").slice(0, 7) === date.slice(0, 7) && e.date <= date && isEveryday(e)).reduce((t, e) => t + (+e.amount || 0), 0);
   const monthKey = date.slice(0, 7);
   const monthRepaid = debtPays.filter(p => (p.date || "").slice(0, 7) === monthKey && p.date <= date).reduce((t, p) => t + net(p), 0);
   const monthClosed = debts.filter(o => (o.status === "closed" || o.status === "settled") && (o.closedAt || "").slice(0, 7) === monthKey && o.closedAt <= date).length;
@@ -620,7 +626,8 @@ export function drawClearingLog(canvas, snap, { dayNumber, quote, hide = false }
 // ---------- monthly wrap-up ----------
 export function buildMonthWrap({ month, today, expenses, payments, incomes, oblig, sourceLabel, includeLoans = true }) {
   const inMonth = (x) => (x.date || "").slice(0, 7) === month;
-  const exp = (expenses || []).filter(inMonth);
+  const exp = (expenses || []).filter(e => inMonth(e) && isEveryday(e));
+  const loanRelated = (expenses || []).filter(e => inMonth(e) && !isEveryday(e)).reduce((s, e) => s + (+e.amount || 0), 0);
   const pays = (payments || []).filter(inMonth);
   const loansPaid = pays.reduce((s, p) => s + (+p.amount || 0) - (+p.coversSpends || 0), 0);
   const byCat = {};
@@ -628,14 +635,14 @@ export function buildMonthWrap({ month, today, expenses, payments, incomes, obli
   const cats = Object.entries(byCat).map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value);
   const slices = cats.length > 6 ? [...cats.slice(0, 5), { label: "Everything else", value: cats.slice(5).reduce((s, x) => s + x.value, 0) }] : cats;
   const outTotal = cats.reduce((s, x) => s + x.value, 0); // everyday spending (the chart)
-  const outAll = outTotal + loansPaid;                    // everything that went out
+  const outAll = outTotal + loansPaid + loanRelated;      // everything that went out
   const bySource = {};
   (incomes || []).filter(inMonth).forEach(i => { const k = sourceLabel(i); bySource[k] = (bySource[k] || 0) + (+i.amount || 0); });
   const sources = Object.entries(bySource).map(([label, value]) => ({ label, value })).filter(x => x.value > 0).sort((a, b) => b.value - a.value);
   // Same basis as outTotal, for last month.
   const [y, m] = month.split("-").map(Number);
   const prev = `${m === 1 ? y - 1 : y}-${String(m === 1 ? 12 : m - 1).padStart(2, "0")}`;
-  const prevOut = (expenses || []).filter(e => (e.date || "").slice(0, 7) === prev).reduce((s, e) => s + (+e.amount || 0), 0)
+  const prevOut = (expenses || []).filter(e => (e.date || "").slice(0, 7) === prev && isEveryday(e)).reduce((s, e) => s + (+e.amount || 0), 0)
 ;
   // No-spend days: days so far this month (or the whole month, if it's over) with no everyday spend logged.
   const daysInMonth = new Date(y, m, 0).getDate();

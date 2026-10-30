@@ -1,7 +1,7 @@
 "use client";
 import { supabase } from "../lib/supabaseClient";
 import { useState, useEffect, useMemo, useRef } from "react";
-import MoneyLogModal from "./MoneyLog";
+import MoneyLogModal, { isEveryday } from "./MoneyLog";
 import {
   Wallet, Landmark, PiggyBank, Users, Plus, Bell, BellRing, Trash2, Settings as SettingsIcon, Repeat,
   ArrowRightLeft, X, Zap, ShieldCheck, Heart, Check, Download, Upload, ArrowDownUp,
@@ -617,7 +617,7 @@ export default function Clearing({ userId }) {
   const setAside = dueSoon.reduce((s, o) => s + o.amount, 0);
   const safeToSpend = moneyInHand - setAside - jarReserved - (+settings.buffer || 0);
   const monthKey = localMonth();
-  const monthExp = expenses.filter(e => e.date.slice(0, 7) === monthKey);
+  const monthExp = expenses.filter(e => e.date.slice(0, 7) === monthKey && isEveryday(e));
   const monthSpend = monthExp.reduce((s, e) => s + (+e.amount || 0), 0);
 
   const debtStrategy = settings.payoffStrategy || "avalanche";
@@ -1742,7 +1742,7 @@ function SettleForm({ accounts, outstanding, onSettle, onCancel }) {
    ================================================================================================ */
 const sum = (arr, f = (x) => x) => (arr || []).reduce((s, x) => s + (+f(x) || 0), 0);
 const fmtDay = (d) => { try { return new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }); } catch { return d; } };
-const NON_LIVING = ["invest", "account transfer"]; // money moved, not spent on living
+const NON_LIVING = ["invest", "account transfer", "loan related"]; // money moved or sent toward debt, not spent on living
 
 // Average everyday spend over the last (up to 3) complete months — the starting guess for the plan.
 function recentLivingAverage(expenses) {
@@ -1831,22 +1831,26 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
   const now = new Date();
   const lastMonthKey = localMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1));
   const inMonth = (x, m) => (x.date || "").slice(0, 7) === m;
-  const monthSpend = sum(expenses.filter(e => inMonth(e, monthKey)), e => e.amount);
+  // Everyday spending leaves out Loan Related spends (debt money, listed but not counted as living).
+  const monthSpend = sum(expenses.filter(e => inMonth(e, monthKey) && isEveryday(e)), e => e.amount);
+  const monthLoanRelated = sum(expenses.filter(e => inMonth(e, monthKey) && !isEveryday(e)), e => e.amount);
   const monthRepaid = sum(payments.filter(p => inMonth(p, monthKey)), netPaid);
   const monthIn = sum(incomes.filter(i => inMonth(i, monthKey)), i => i.amount);
-  const monthOut = monthSpend + monthRepaid;
+  const monthOut = monthSpend + monthRepaid + monthLoanRelated;
   // Compare like with like: this month so far vs the same days of last month.
   const dayOfMonth = now.getDate();
-  const lastSpend = sum(expenses.filter(e => inMonth(e, lastMonthKey) && +(e.date || "").slice(8, 10) <= dayOfMonth), e => e.amount);
+  const lastSpend = sum(expenses.filter(e => inMonth(e, lastMonthKey) && +(e.date || "").slice(8, 10) <= dayOfMonth && isEveryday(e)), e => e.amount);
   const trend = lastSpend > 0 ? Math.round(((monthSpend - lastSpend) / lastSpend) * 100) : null;
   const budget = +settings.budget || 0;
 
   // Breakdown for the chosen period: spending categories + repayments as one slice.
-  const pExp = expenses.filter(e => inPeriod(e.date, period));
+  const pExp = expenses.filter(e => inPeriod(e.date, period) && isEveryday(e));
   const pPaid = sum(payments.filter(p => inPeriod(p.date, period)), netPaid);
+  const pLoanRelated = sum(expenses.filter(e => inPeriod(e.date, period) && !isEveryday(e)), e => e.amount);
   const byCat = [
     ...[...new Set(pExp.map(e => e.cat || "Other"))].map(c => ({ c, total: sum(pExp.filter(e => (e.cat || "Other") === c), e => e.amount) })),
     ...(withRepay && pPaid > 0 ? [{ c: "Loan repayments", total: pPaid, isLoan: true }] : []),
+    ...(withRepay && pLoanRelated > 0 ? [{ c: "Loan Related", total: pLoanRelated, isLoan: true }] : []),
   ].filter(x => x.total > 0).sort((a, b) => b.total - a.total).map((x, i) => ({ ...x, color: x.isLoan ? C.violet : CHART_PALETTE[i % CHART_PALETTE.length] }));
   const pTotal = sum(byCat, x => x.total);
 
@@ -1983,9 +1987,9 @@ function MoneyTab({ expenses, setExpenses, payments, incomes, setIncomes, oblig,
             </div>
           </div>
         )}
-        {pPaid > 0 && (
+        {(pPaid > 0 || pLoanRelated > 0) && (
           <div className="row" style={{ justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: "1px solid " + C.line, gap: 8 }}>
-            <span className="sub">{withRepay ? "Including" : "Not including"} {inr(pPaid)} of loan repayments</span>
+            <span className="sub">{withRepay ? "Including" : "Not including"} {[pPaid > 0 ? `${inr(pPaid)} of loan repayments` : "", pLoanRelated > 0 ? `${inr(pLoanRelated)} Loan Related` : ""].filter(Boolean).join(" and ")}</span>
             <button className="link" onClick={() => setWithRepay(v => !v)}>{withRepay ? "Show everyday only" : "Include them"}</button>
           </div>
         )}
