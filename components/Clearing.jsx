@@ -484,8 +484,8 @@ export default function Clearing({ userId }) {
   const addRecurring = (r) => setSettings(s => ({ ...s, recurring: [...(s.recurring || []), { id: crypto.randomUUID(), active: true, ...r }] }));
   const [wantsOpen, setWantsOpen] = useState(false);
   // Records a debt payment exactly like the Clear tab does (used by the salary plan).
-  const payDebt = (id, amt, accountId, note) => {
-    const d = localDay();
+  const payDebt = (id, amt, accountId, note, date) => {
+    const d = date || localDay();
     setOblig(x => x.map(o => {
       if (o.id !== id) return o;
       const outstanding = Math.max(0, (+o.outstanding || 0) - amt);
@@ -868,7 +868,8 @@ export default function Clearing({ userId }) {
           <Plus size={28} />
         </button>
       )}
-      {quickAdd && <QuickAdd {...{ accounts, expenses, settings, logExpense, logIncome }} cards={oblig.filter(o => o.isCreditCard && o.status !== "settled")} onAddRecurring={addRecurring} initialMode={quickAdd} onClose={(m) => { setQuickAdd(false); if (m) setCelebrate(m); }} />}
+      {quickAdd && <QuickAdd {...{ accounts, expenses, payments, settings, logExpense, logIncome, payDebt }} cards={oblig.filter(o => o.isCreditCard && o.status !== "settled")}
+        debts={oblig.filter(o => o.status !== "closed" && o.status !== "settled" && (+o.outstanding || 0) > 0)} onAddRecurring={addRecurring} initialMode={quickAdd} onClose={(m) => { setQuickAdd(false); if (m) setCelebrate(m); }} />}
       {logDate && (
         <MoneyLogModal date={logDate} onDateChange={setLogDate} snapshotInput={snapshotInput} suggestedDay={suggestedDay(logDate)}
           posts={logPosts} customQuotes={settings.quotes || []}
@@ -1079,9 +1080,23 @@ function SourcePicker({ source, setSource, custom, setCustom }) {
 }
 // One-tap logging from any tab: a big amount field, recent categories first, and the account you
 // used last time already picked — so logging a spend on the go takes a few seconds.
-function QuickAdd({ accounts, cards = [], expenses, settings, logExpense, logIncome, onAddRecurring, onClose, initialMode = "out" }) {
+function QuickAdd({ accounts, cards = [], debts = [], expenses, payments = [], settings, logExpense, logIncome, payDebt, onAddRecurring, onClose, initialMode = "out" }) {
   const [repeat, setRepeat] = useState(false);
-  const [mode, setMode] = useState(initialMode === "in" ? "in" : "out");
+  const [mode, setMode] = useState(["in", "repay"].includes(initialMode) ? initialMode : "out");
+  // Repaid: a payment toward a debt on the Clear tab, recorded exactly like its Pay button.
+  const [debtId, setDebtId] = useState("");
+  const debt = debts.find(o => o.id === debtId);
+  const [payAcc, setPayAcc] = useState(accounts.find(a => a.purpose === "debt")?.id || accounts.find(a => a.purpose === "living" && !a.isCash)?.id || accounts[0]?.id || "");
+  const pickDebt = (id) => {
+    setDebtId(id);
+    const o = debts.find(x => x.id === id);
+    if (!o) return;
+    if (!amt) { const due = dueAmount(o); if (due > 0) setAmt(String(Math.min(due, +o.outstanding || 0))); }
+    const last = [...payments].filter(p => p.obligId === id && p.accountId && accounts.some(a => a.id === p.accountId)).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+    if (last) setPayAcc(last.accountId);
+  };
+  const debtGroups = [["Credit cards", o => o.isCreditCard], ["Loans", o => !o.isCreditCard && o.type !== "family"], ["Family & friends", o => !o.isCreditCard && o.type === "family"]]
+    .map(([label, test]) => [label, debts.filter(test)]).filter(([, list]) => list.length);
   const [amt, setAmt] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(localDay());
@@ -1098,9 +1113,15 @@ function QuickAdd({ accounts, cards = [], expenses, settings, logExpense, logInc
   const [acc, setAcc] = useState(settings.lastAccountId && (accounts.some(a => a.id === settings.lastAccountId) || cards.some(c => "card:" + c.id === settings.lastAccountId)) ? settings.lastAccountId : (accounts.find(a => a.purpose === "living")?.id || accounts[0]?.id || ""));
   const [inAcc, setInAcc] = useState(accounts.find(a => a.purpose === "income")?.id || accounts[0]?.id || "");
   const yesterday = localDay(new Date(Date.now() - 86400000));
-  const ok = +amt > 0;
+  const ok = +amt > 0 && (mode !== "repay" || !!debt);
   function save() {
     if (!ok) return;
+    if (mode === "repay") {
+      const name = debt.name.trim();
+      payDebt(debt.id, +amt, payAcc, note.trim(), date);
+      onClose(+amt >= (+debt.outstanding || 0) ? `Cleared ${name} in full. One less to carry.` : `Paid ${inr(+amt)} off ${name}.`);
+      return;
+    }
     if (mode === "out") {
       logExpense({ amount: +amt, cat, note: note.trim(), date, accountId: acc });
       if (repeat && onAddRecurring) onAddRecurring({ amount: +amt, cat, note: note.trim(), accountId: acc, day: +date.slice(8, 10), lastMonth: date.slice(0, 7) });
@@ -1115,24 +1136,41 @@ function QuickAdd({ accounts, cards = [], expenses, settings, logExpense, logInc
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,28,40,.45)", zIndex: 55, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => onClose()}>
       <div className="card sheet" style={{ width: "100%", maxWidth: 520, borderRadius: "22px 22px 0 0", display: "grid", gap: 12, paddingBottom: 28 }} onClick={e => e.stopPropagation()}>
         <div className="row" style={{ gap: 8 }}>
-          {tabBtn("out", "Spent", C.coral)}{tabBtn("in", "Received", C.teal)}
+          {tabBtn("out", "Spent", C.coral)}{tabBtn("in", "Received", C.teal)}{debts.length > 0 && tabBtn("repay", "Repaid", C.violet)}
           <button className="ib" onClick={() => onClose()} aria-label="Close"><X size={20} /></button>
         </div>
         <input className="in big" type="number" inputMode="decimal" placeholder="₹ 0" value={amt} onChange={e => setAmt(e.target.value)} autoFocus
           onKeyDown={e => { if (e.key === "Enter") save(); }} />
-        <input className="in" placeholder={mode === "out" ? "What was it? (e.g. auto, swiggy, blinkit)" : "Note (optional)"} value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
-        {mode === "out" ? (
+        <input className="in" placeholder={mode === "out" ? "What was it? (e.g. auto, swiggy, blinkit)" : mode === "repay" ? "Note (optional, e.g. Nov EMI)" : "Note (optional)"} value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
+        {mode === "repay" ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <select className="in" value={debtId} onChange={e => pickDebt(e.target.value)}>
+              <option value="">Which debt did you pay?</option>
+              {debtGroups.map(([label, list]) => (
+                <optgroup key={label} label={label}>
+                  {list.map(o => <option key={o.id} value={o.id}>{o.name.trim()} · {inr(o.outstanding)} left</option>)}
+                </optgroup>
+              ))}
+            </select>
+            {debt && +amt > (+debt.outstanding || 0) && <div className="sub">That's more than the {inr(debt.outstanding)} left, so it will be marked cleared.</div>}
+          </div>
+        ) : mode === "out" ? (
           <div>
             {suggested && cat === suggested && !catTouched && <div className="sub" style={{ marginBottom: 6 }}>✨ Suggested from your note — tap another to change</div>}
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               {cats.map(c => <Pill key={c} on={cat === c} onClick={() => setCat(c)}>{c}</Pill>)}
             </div>
+            {!isEveryday({ cat }) && debts.length > 0 && (
+              <div className="sub" style={{ marginTop: 6 }}>
+                Paying off a debt you track on Clear? <button className="link" onClick={() => setMode("repay")}>Log it as Repaid</button> so it comes off the balance.
+              </div>
+            )}
           </div>
         ) : <SourcePicker source={source} setSource={setSource} custom={custom} setCustom={setCustom} />}
         <div className="row" style={{ gap: 8 }}>
           {accounts.length > 0 && (
-            <select className="in" style={{ flex: 1 }} value={mode === "out" ? acc : inAcc} onChange={e => (mode === "out" ? setAcc : setInAcc)(e.target.value)}>
-              <option value="">No account</option>
+            <select className="in" style={{ flex: 1 }} value={mode === "out" ? acc : mode === "repay" ? payAcc : inAcc} onChange={e => (mode === "out" ? setAcc : mode === "repay" ? setPayAcc : setInAcc)(e.target.value)}>
+              <option value="">{mode === "repay" ? "Paid outside the app (don't deduct)" : "No account"}</option>
               {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
               {mode === "out" && cards.length > 0 && <optgroup label="Paid by credit card">{cards.map(c => <option key={c.id} value={"card:" + c.id}>💳 {c.name.trim()}</option>)}</optgroup>}
             </select>
@@ -1147,7 +1185,7 @@ function QuickAdd({ accounts, cards = [], expenses, settings, logExpense, logInc
             Repeats every month on the {ordinal(+date.slice(8, 10))} (log it automatically)
           </label>
         )}
-        <button className="btn" disabled={!ok} onClick={save} style={{ padding: 14, fontSize: 16, justifyContent: "center" }}>{mode === "out" ? "Log spend" : "Log income"}</button>
+        <button className="btn" disabled={!ok} onClick={save} style={{ padding: 14, fontSize: 16, justifyContent: "center" }}>{mode === "out" ? "Log spend" : mode === "repay" ? "Log repayment" : "Log income"}</button>
       </div>
     </div>
   );
